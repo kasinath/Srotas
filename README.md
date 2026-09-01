@@ -11,6 +11,13 @@ hazard detection were added, and the whole design was verified by actually
 simulating it — twice, in two independent simulators — rather than just
 reading the code.
 
+### About the name
+
+**Srotas** (स्रोतस्) is Sanskrit for "flow" or "stream" — a fitting name for
+a pipeline: instructions enter at Fetch and flow continuously through
+Decode, Execute, Memory, and Write-Back, one stage advancing every clock
+cycle like water moving downstream.
+
 ## Status
 
 | | |
@@ -42,129 +49,13 @@ not just decoded, but checked against the exact value it should produce.
 
 ## Architecture
 
-```mermaid
-flowchart LR
-    %% ---------- IF ----------
-    subgraph IF["IF — Instruction Fetch"]
-        direction TB
-        PCMUX{{"Next-PC MUX"}}
-        PCREG["PC Register"]
-        ADD4["PC + 4"]
-        IMEM[("Instruction<br/>Memory")]
+![Srotas 5-stage datapath: Fetch, Decode, Execute, Memory, Write-Back, with forwarding and hazard detection](docs/architecture.svg)
 
-        PCMUX -->|"pc_next"| PCREG
-        PCREG -->|"pc_current"| ADD4
-        PCREG -->|"instruction address"| IMEM
-        ADD4 -->|"sequential PC+4"| PCMUX
-    end
-
-    IFID[["IF/ID Register<br/>PC · PC+4 · instruction"]]
-    PCREG -->|"PC"| IFID
-    ADD4 -->|"PC+4"| IFID
-    IMEM -->|"instruction"| IFID
-
-    %% ---------- ID ----------
-    subgraph ID["ID — Instruction Decode"]
-        direction TB
-        CU["Control Unit"]
-        RF["Register File"]
-        IMM["Immediate / Sign Extend"]
-    end
-
-    IDEX[["ID/EX Register<br/>PC · PC+4 · rs1/rs2 addresses · rs1/rs2 data · immediate · funct3 · controls"]]
-    IFID -->|"opcode"| CU
-    IFID -->|"rs1, rs2, rd"| RF
-    IFID -->|"instruction"| IMM
-    IFID -->|"PC, PC+4"| IDEX
-    CU -->|"control signals"| IDEX
-    RF -->|"rs1 data, rs2 data"| IDEX
-    IMM -->|"immediate"| IDEX
-
-    %% ---------- EX ----------
-    subgraph EX["EX — Execute"]
-        direction TB
-        FWA{{"Forward A<br/>(ID/EX · EX/MEM · WB)"}}
-        FWB{{"Forward B<br/>(ID/EX · EX/MEM · WB)"}}
-        ASELA{{"Operand-A Select<br/>(PC · 0 · rs1_fwd)"}}
-        ASELB{{"Operand-B Select<br/>(rs2_fwd · immediate)"}}
-        ALU["ALU"]
-        BU["Branch / Jump Unit"]
-
-        FWA --> ASELA --> ALU
-        FWB --> ASELB --> ALU
-        ALU -->|"ALU result / zero"| BU
-    end
-
-    EXMEM[["EX/MEM Register<br/>PC+4 · ALU result · store data · rd · funct3 · controls"]]
-    IDEX -->|"rs1 address/data"| FWA
-    IDEX -->|"rs2 address/data"| FWB
-    IDEX -->|"PC"| ASELA
-    IDEX -->|"immediate"| ASELB
-    IDEX -->|"PC, immediate, funct3,<br/>branch, jump, JALR"| BU
-    ALU -->|"ALU result"| EXMEM
-
-    %% ---------- MEM ----------
-    subgraph MEM["MEM — Memory Access"]
-        direction TB
-        DMEM[("Data<br/>Memory")]
-    end
-
-    MEMWB[["MEM/WB Register<br/>PC+4 · ALU result · memory data · rd · controls"]]
-    EXMEM -->|"address · store data · MemRead · MemWrite · funct3"| DMEM
-    EXMEM -->|"PC+4 · ALU result · rd · RegWrite · ResultSrc"| MEMWB
-    DMEM -->|"load data"| MEMWB
-
-    %% ---------- WB ----------
-    subgraph WB["WB — Write Back"]
-        direction TB
-        WM{{"Result MUX<br/>(ALU · memory · PC+4)"}}
-    end
-
-    MEMWB -->|"ALU result"| WM
-    MEMWB -->|"memory read data"| WM
-    MEMWB -->|"PC+4 link value"| WM
-    WM -->|"final wb_data · rd · RegWrite"| RF
-
-    %% ---------- Hazard and forwarding ----------
-    HDU["Hazard / Forward Unit<br/><br/>Load-use interlock:<br/>stall PC + IF/ID, flush ID/EX<br/><br/>Forwarding priority:<br/>EX/MEM over MEM/WB"]
-    IFID -.->|"id_rs1, id_rs2"| HDU
-    IDEX -.->|"id_ex_rs1, id_ex_rs2,<br/>id_ex_rd, id_ex_mem_read"| HDU
-    EXMEM -.->|"ex_mem_rd, ex_mem_RegWrite"| HDU
-    WM -.->|"final_wb_rd, final_wb_RegWrite"| HDU
-
-    HDU -.->|"pc_write_en"| PCREG
-    HDU -.->|"if_id_write_en,<br/>if_id_flush"| IFID
-    HDU -.->|"id_ex_flush"| IDEX
-    HDU -.->|"forward_a"| FWA
-    HDU -.->|"forward_b"| FWB
-
-    %% EX/MEM forwarding never uses a load result.
-    EXFWD["EX/MEM forward source<br/>(ALU result or PC+4 link)"]
-    EXMEM --> EXFWD
-    EXFWD -.->|"fwd_exmem_data"| FWA
-    EXFWD -.->|"fwd_exmem_data"| FWB
-
-    %% A load is stalled, then available through the final WB value.
-    WM -.->|"fwd_memwb_data<br/>(final writeback value)"| FWA
-    WM -.->|"fwd_memwb_data<br/>(final writeback value)"| FWB
-
-    %% Control hazards
-    BU -->|"redirect target"| PCMUX
-    BU -.->|"ex_redirect"| HDU
-
-    classDef pipeline fill:#fff1c5,stroke:#917536,color:#3e3212;
-    classDef unit fill:#dceafa,stroke:#172f4a,color:#102d49;
-    classDef memory fill:#d3e4f6,stroke:#172f4a,color:#102d49;
-    classDef mux fill:#eedcf7,stroke:#6b4a80,color:#352142;
-    classDef hazard fill:#d7f0ed,stroke:#21766d,color:#124e48;
-
-    class IFID,IDEX,EXMEM,MEMWB pipeline;
-    class PCREG,ADD4,CU,RF,IMM,ALU,BU,ASELA,ASELB unit;
-    class IMEM,DMEM memory;
-    class PCMUX,FWA,FWB,WM mux;
-    class HDU,EXFWD hazard;
-
-```
+An editable version of this diagram is at `docs/architecture.pptx` — every
+box, mux, and wire is a native PowerPoint shape (not an embedded picture),
+so colors, positions, and labels can be changed directly in PowerPoint. It
+was generated from `tools/gen_architecture_pptx.py`; regenerate it after
+editing that script rather than hand-maintaining both files.
 
 - **PC MUX** selects `PC+4` vs. `branch_target` on `branch_redirect` — the
   redirect condition (`jump`, or `branch && branch_taken`) is computed in
@@ -444,10 +335,25 @@ The processor only implements the base RV32I integer ISA — no compressed
 program must target `-march=rv32i` and avoid anything that needs an OS or
 those extensions.
 
-## Known limitations (by design, for a single hobby-scale in-order core)
+## Known limitations (current scope, for a single hobby-scale in-order core)
 
 - No branch prediction — every taken branch/jump costs a 2-cycle bubble.
 - No exceptions, interrupts, or CSRs.
 - No M-extension (multiply/divide) or C-extension (compressed instructions).
 - Single outstanding memory access per cycle, no caches.
 
+None of these are permanent limits, just what v1 covers — see below.
+
+## Contributing
+
+This started as a 5-day learning project and is very much still growing.
+Branch prediction, the M/C extensions, exceptions and CSRs, caches, and an
+FPGA bring-up on real hardware are all natural next steps, and they're
+deliberately left as future releases rather than tackled all at once.
+
+Contributions, issues, and ideas are welcome from anyone — whether that's
+fixing a bug, adding a feature from the list above, extending the test
+suite, or just asking a question. If you're extending the ISA support or
+the pipeline itself, the directed regression in `tb_isa_directed.v` is the
+place to add new checks alongside your change, the same way every existing
+feature is verified.
