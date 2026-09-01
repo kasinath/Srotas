@@ -5,11 +5,6 @@ base integer ISA** with a classic 5-stage in-order pipeline —
 **IF → ID → EX → MEM → WB** — full data forwarding, load-use hazard
 stalling, and branch/jump resolution with pipeline squash.
 
-Built as a 5-day learning project, then taken through a correctness pass:
-every stage's interface was made consistent end to end, forwarding and
-hazard detection were added, and the whole design was verified by actually
-simulating it — twice, in two independent simulators — rather than just
-reading the code.
 
 ### About the name
 
