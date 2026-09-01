@@ -5,6 +5,11 @@ base integer ISA** with a classic 5-stage in-order pipeline —
 **IF → ID → EX → MEM → WB** — full data forwarding, load-use hazard
 stalling, and branch/jump resolution with pipeline squash.
 
+Built as a 5-day learning project, then taken through a correctness pass:
+every stage's interface was made consistent end to end, forwarding and
+hazard detection were added, and the whole design was verified by actually
+simulating it — twice, in two independent simulators — rather than just
+reading the code.
 
 ### About the name
 
@@ -43,91 +48,6 @@ Every one of these is individually exercised by the test suite below —
 not just decoded, but checked against the exact value it should produce.
 
 ## Architecture
-
-![Srotas 5-stage datapath: Fetch, Decode, Execute, Memory, Write-Back, with forwarding and hazard detection](docs/architecture.svg)
-
-An editable version of this diagram is at `docs/architecture.pptx` — every
-box, mux, and wire is a native PowerPoint shape (not an embedded picture),
-so colors, positions, and labels can be changed directly in PowerPoint. It
-was generated from `tools/gen_architecture_pptx.py`; regenerate it after
-editing that script rather than hand-maintaining both files.
-
-- **PC MUX** selects `PC+4` vs. `branch_target` on `branch_redirect` — the
-  redirect condition (`jump`, or `branch && branch_taken`) is computed in
-  `branch_unit.v`; a not-taken branch never touches this mux at all.
-- **ForwardA and ForwardB are two independent muxes**, one per ALU operand,
-  each with its own 3-way select (`00`=un-forwarded ID/EX value,
-  `01`=EX/MEM, `10`=MEM/WB) — not a single shared mux. `EX/MEM` wins if it
-  and `MEM/WB` would otherwise both match the same register, since it's the
-  more recent producer.
-- **The MEM/WB forward source is the actual final writeback value**
-  (`fwd_memwb_data = final_wb_rd_data`, i.e. whatever the WB stage's own
-  ALU/memory/link mux resolved to) — not a raw internal MEM/WB register
-  field, which for e.g. a JAL producer would be architecturally wrong.
-- **Load-use hazard detection is a separate concern from forwarding**,
-  even though one `hazard_detection_unit` module computes both: it compares
-  the *decode-stage* instruction's source registers against the *EX-stage*
-  instruction's destination and `mem_read` flag — one cycle earlier in the
-  pipeline than where the forwarding comparison happens — because by the
-  time a load's data would be forwardable, it's already too late to avoid
-  a wrong read; the only fix at that point is a 1-cycle stall.
-- **3-instructions-apart hazard** (producer in WB exactly when the consumer
-  is in ID) is handled inside the register file itself, with a same-cycle
-  write-then-read bypass — the classic "write in the first half of the
-  cycle, read in the second half" trick — since by then both the
-  forwarding unit's and the load-use detector's windows have moved past.
-- **Branches/jumps** resolve in EX. A taken branch or jump redirects the PC
-  and squashes the two wrong-path instructions already fetched (in IF and
-  ID) the same cycle.
-- **Memories** are separate instruction and data RAMs (Harvard-style)
-  living inside the IF and MEM stages, sized and optionally preloaded via
-  Verilog parameters — no external memory ports to wire up.
-
-### Hazards in action (real waveform behavior, not a claim)
-
-Three concrete cases, cycle-by-cycle, as the pipeline actually runs them:
-
-**Back-to-back dependent instructions — forwarded, zero stall cycles**
-```
-addi x20, x0, 1        IF  ID  EX  MEM WB
-add  x20, x20, x20      .  IF  ID  EX  MEM WB   <- EX/MEM forward supplies x20
-add  x20, x20, x20      .   .  IF  ID  EX  MEM WB   <- forward again, every cycle
-```
-Verified: the accumulator chain in the test suite (`1 → 2 → 4 → 8 → 16 → 32`)
-commits one write per cycle with no gaps — confirmed against the simulation
-log, where each commit lands exactly 10ns (one clock period) after the last.
-
-**Load immediately followed by its consumer — one stall cycle**
-```
-lw   x17, 0(x2)         IF  ID  EX  MEM WB
-add  x18, x17, x0        .  IF  ID  **   EX  MEM WB   <- bubble inserted, then forwarded
-```
-Verified: these two commits land 20ns apart (two cycles) instead of the
-usual 10ns — exactly one bubble, as designed, and the result is still
-correct because the stalled instruction picks up the value via EX/MEM
-forwarding once the load reaches MEM.
-
-**Taken branch — 2 wrong-path instructions squashed, redirect same cycle**
-```
-beq  x1, x2, TARGET     IF  ID  EX          <- resolved here, PC redirected this cycle
-addi x3, x0, 999         .  IF  **                <- squashed (was in ID)
-addi x3, x0, 999          .   .  --                <- squashed (was being fetched)
-TARGET:
-addi x24, x0, 111             .   .  IF  ID  EX  MEM WB
-```
-Verified: with a poison value (`999`) that would be unmistakable if either
-squashed instruction ever committed, and it never does — the scoreboard
-would flag it immediately as an unexpected commit if the squash logic
-ever failed.
-
-## Testing
-
-Two testbenches, built around a `wb_commit_valid/rd/data` debug port that
-reports every real architectural register write as it retires — this is
-what both testbenches watch instead of peeking at internal state.
-
-### `tb_isa_directed.v` — the regression
-
 ```mermaid
 flowchart LR
     %% ---------- IF ----------
@@ -249,7 +169,103 @@ flowchart LR
     class IMEM,DMEM memory;
     class PCMUX,FWA,FWB,WM mux;
     class HDU,EXFWD hazard;
+```
 
+
+An editable version of this diagram is at `docs/architecture.pptx` — every
+box, mux, and wire is a native PowerPoint shape (not an embedded picture),
+so colors, positions, and labels can be changed directly in PowerPoint. It
+was generated from `tools/gen_architecture_pptx.py`; regenerate it after
+editing that script rather than hand-maintaining both files.
+
+- **PC MUX** selects `PC+4` vs. `branch_target` on `branch_redirect` — the
+  redirect condition (`jump`, or `branch && branch_taken`) is computed in
+  `branch_unit.v`; a not-taken branch never touches this mux at all.
+- **ForwardA and ForwardB are two independent muxes**, one per ALU operand,
+  each with its own 3-way select (`00`=un-forwarded ID/EX value,
+  `01`=EX/MEM, `10`=MEM/WB) — not a single shared mux. `EX/MEM` wins if it
+  and `MEM/WB` would otherwise both match the same register, since it's the
+  more recent producer.
+- **The MEM/WB forward source is the actual final writeback value**
+  (`fwd_memwb_data = final_wb_rd_data`, i.e. whatever the WB stage's own
+  ALU/memory/link mux resolved to) — not a raw internal MEM/WB register
+  field, which for e.g. a JAL producer would be architecturally wrong.
+- **Load-use hazard detection is a separate concern from forwarding**,
+  even though one `hazard_detection_unit` module computes both: it compares
+  the *decode-stage* instruction's source registers against the *EX-stage*
+  instruction's destination and `mem_read` flag — one cycle earlier in the
+  pipeline than where the forwarding comparison happens — because by the
+  time a load's data would be forwardable, it's already too late to avoid
+  a wrong read; the only fix at that point is a 1-cycle stall.
+- **3-instructions-apart hazard** (producer in WB exactly when the consumer
+  is in ID) is handled inside the register file itself, with a same-cycle
+  write-then-read bypass — the classic "write in the first half of the
+  cycle, read in the second half" trick — since by then both the
+  forwarding unit's and the load-use detector's windows have moved past.
+- **Branches/jumps** resolve in EX. A taken branch or jump redirects the PC
+  and squashes the two wrong-path instructions already fetched (in IF and
+  ID) the same cycle.
+- **Memories** are separate instruction and data RAMs (Harvard-style)
+  living inside the IF and MEM stages, sized and optionally preloaded via
+  Verilog parameters — no external memory ports to wire up.
+
+### Hazards in action (real waveform behavior, not a claim)
+
+Three concrete cases, cycle-by-cycle, as the pipeline actually runs them:
+
+**Back-to-back dependent instructions — forwarded, zero stall cycles**
+```
+addi x20, x0, 1        IF  ID  EX  MEM WB
+add  x20, x20, x20      .  IF  ID  EX  MEM WB   <- EX/MEM forward supplies x20
+add  x20, x20, x20      .   .  IF  ID  EX  MEM WB   <- forward again, every cycle
+```
+Verified: the accumulator chain in the test suite (`1 → 2 → 4 → 8 → 16 → 32`)
+commits one write per cycle with no gaps — confirmed against the simulation
+log, where each commit lands exactly 10ns (one clock period) after the last.
+
+**Load immediately followed by its consumer — one stall cycle**
+```
+lw   x17, 0(x2)         IF  ID  EX  MEM WB
+add  x18, x17, x0        .  IF  ID  **   EX  MEM WB   <- bubble inserted, then forwarded
+```
+Verified: these two commits land 20ns apart (two cycles) instead of the
+usual 10ns — exactly one bubble, as designed, and the result is still
+correct because the stalled instruction picks up the value via EX/MEM
+forwarding once the load reaches MEM.
+
+**Taken branch — 2 wrong-path instructions squashed, redirect same cycle**
+```
+beq  x1, x2, TARGET     IF  ID  EX          <- resolved here, PC redirected this cycle
+addi x3, x0, 999         .  IF  **                <- squashed (was in ID)
+addi x3, x0, 999          .   .  --                <- squashed (was being fetched)
+TARGET:
+addi x24, x0, 111             .   .  IF  ID  EX  MEM WB
+```
+Verified: with a poison value (`999`) that would be unmistakable if either
+squashed instruction ever committed, and it never does — the scoreboard
+would flag it immediately as an unexpected commit if the squash logic
+ever failed.
+
+## Testing
+
+Two testbenches, built around a `wb_commit_valid/rd/data` debug port that
+reports every real architectural register write as it retires — this is
+what both testbenches watch instead of peeking at internal state.
+
+### `tb_isa_directed.v` — the regression
+
+```mermaid
+flowchart TD
+    ENC["rv32i_encoder.vh<br/>mnemonic → machine code functions"]
+    AUTHOR["Test program authored as<br/>emit(instr) + chk(rd, expected_data)<br/>in true execution order"]
+    ENC --> AUTHOR
+    AUTHOR -->|"hierarchical load<br/>at time 0"| IMEM[("DUT instruction memory")]
+    AUTHOR -->|"builds"| QUEUE["Expected-commit queue<br/>(rd, data) pairs, in order"]
+    IMEM --> DUT["srotas_processor"]
+    DUT -->|"wb_commit_valid/rd/data<br/>every cycle"| SCORE{{"Scoreboard:<br/>next actual commit ==<br/>next expected entry?"}}
+    QUEUE --> SCORE
+    SCORE -->|match| LOG["pass: xN = 0x........"]
+    SCORE -->|"mismatch, or extra/<br/>missing commit"| FAIL["FAIL + exact register,<br/>expected vs. actual, timestamp"]
 ```
 
 Because this pipeline is strictly in-order and single-issue, "the next
@@ -462,3 +478,9 @@ suite, or just asking a question. If you're extending the ISA support or
 the pipeline itself, the directed regression in `tb_isa_directed.v` is the
 place to add new checks alongside your change, the same way every existing
 feature is verified.
+
+## Credits
+
+Built as a 5-day learning project (`docs/day1_summary.md` –
+`day5_summary.md`), then corrected and verified end-to-end
+(`docs/day6_correctness_pass.md`).
