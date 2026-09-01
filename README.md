@@ -45,47 +45,95 @@ not just decoded, but checked against the exact value it should produce.
 ```mermaid
 flowchart LR
     subgraph IF["IF — Fetch"]
-        PC["PC reg"] --> IMEM[("Instruction<br/>Memory")]
+        direction TB
+        PCMUX{{"PC MUX"}} --> PCREG["PC reg"] --> IMEM[("Instruction<br/>Memory")]
     end
+
+    IFID[["IF/ID reg"]]
+
     subgraph ID["ID — Decode"]
+        direction TB
         RF["Register File"]
         CU["Control Unit"]
         SE["Sign Extend"]
     end
+
+    IDEX[["ID/EX reg"]]
+
     subgraph EX["EX — Execute"]
-        FWD{{"Forward<br/>Mux"}} --> ALU
+        direction TB
+        FA{{"Forward A"}} --> ALU
+        FB{{"Forward B"}} --> ALU
         ALU --> BU["Branch/Jump<br/>Unit"]
     end
+
+    EXMEM[["EX/MEM reg"]]
+
     subgraph MEM["MEM — Memory"]
         DMEM[("Data<br/>Memory")]
     end
+
+    MEMWB[["MEM/WB reg"]]
+
     subgraph WB["WB — Writeback"]
-        WM{{"Result<br/>Mux"}}
+        WM{{"Result Mux"}}
     end
 
-    IF -- "IF/ID reg" --> ID
-    ID -- "ID/EX reg" --> EX
-    EX -- "EX/MEM reg" --> MEM
-    MEM -- "MEM/WB reg" --> WB
+    IF --> IFID --> ID --> IDEX --> EX --> EXMEM --> MEM --> MEMWB --> WB
 
-    WM -. "write port<br/>(same cycle bypass)" .-> RF
-    EX -. "EX/MEM forward" .-> FWD
-    WM -. "MEM/WB forward" .-> FWD
-    BU == "redirect + flush IF/ID, ID/EX" ==> PC
+    WM -. "write port<br/>(RF same-cycle bypass)" .-> RF
 
-    HDU["Hazard / Forward Unit"] -.controls stall + forward selects.-> FWD
-    HDU -.controls stall + forward selects.-> PC
+    EXMEM -. "fwd_exmem_data" .-> FA
+    EXMEM -. "fwd_exmem_data" .-> FB
+    WM -. "fwd_memwb_data<br/>(final writeback value)" .-> FA
+    WM -. "fwd_memwb_data<br/>(final writeback value)" .-> FB
+
+    subgraph HDU["Hazard / Forward Unit"]
+        direction TB
+        LUH["Load-Use Hazard Detection<br/>id_ex_mem_read &&<br/>id_ex_rd == id_rs1 / id_rs2"]
+        FWDL["Forwarding Logic<br/>ForwardA / ForwardB,<br/>EX/MEM wins over MEM/WB"]
+    end
+
+    IFID -. "id_rs1 / id_rs2" .-> LUH
+    IDEX -. "id_ex_rd, id_ex_mem_read" .-> LUH
+    IDEX -. "id_ex_rs1 / id_ex_rs2" .-> FWDL
+    EXMEM -. "ex_mem_rd" .-> FWDL
+    MEMWB -. "mem_wb_rd" .-> FWDL
+
+    LUH == "pc_write_en=0, if_id_write_en=0,<br/>id_ex_flush=1 (bubble)" ==> PCREG
+    LUH == " " ==> IFID
+    FWDL == "forward_a" ==> FA
+    FWDL == "forward_b" ==> FB
+
+    BU == "branch_redirect + branch_target" ==> PCMUX
+    BU == "flush (squash wrong path)" ==> IFID
+    BU == "flush (squash wrong path)" ==> IDEX
 ```
 
-- **Forwarding** (EX/MEM → EX, MEM/WB → EX) resolves every back-to-back RAW
-  hazard except a load immediately followed by its consumer — that one
-  cannot be forwarded because the data isn't ready yet, so it stalls the
-  pipeline for exactly one cycle instead.
+- **PC MUX** selects `PC+4` vs. `branch_target` on `branch_redirect` — the
+  redirect condition (`jump`, or `branch && branch_taken`) is computed in
+  `branch_unit.v`; a not-taken branch never touches this mux at all.
+- **ForwardA and ForwardB are two independent muxes**, one per ALU operand,
+  each with its own 3-way select (`00`=un-forwarded ID/EX value,
+  `01`=EX/MEM, `10`=MEM/WB) — not a single shared mux. `EX/MEM` wins if it
+  and `MEM/WB` would otherwise both match the same register, since it's the
+  more recent producer.
+- **The MEM/WB forward source is the actual final writeback value**
+  (`fwd_memwb_data = final_wb_rd_data`, i.e. whatever the WB stage's own
+  ALU/memory/link mux resolved to) — not a raw internal MEM/WB register
+  field, which for e.g. a JAL producer would be architecturally wrong.
+- **Load-use hazard detection is a separate concern from forwarding**,
+  even though one `hazard_detection_unit` module computes both: it compares
+  the *decode-stage* instruction's source registers against the *EX-stage*
+  instruction's destination and `mem_read` flag — one cycle earlier in the
+  pipeline than where the forwarding comparison happens — because by the
+  time a load's data would be forwardable, it's already too late to avoid
+  a wrong read; the only fix at that point is a 1-cycle stall.
 - **3-instructions-apart hazard** (producer in WB exactly when the consumer
   is in ID) is handled inside the register file itself, with a same-cycle
   write-then-read bypass — the classic "write in the first half of the
-  cycle, read in the second half" trick — since by then the forwarding
-  unit's own window has already moved past.
+  cycle, read in the second half" trick — since by then both the
+  forwarding unit's and the load-use detector's windows have moved past.
 - **Branches/jumps** resolve in EX. A taken branch or jump redirects the PC
   and squashes the two wrong-path instructions already fetched (in IF and
   ID) the same cycle.
