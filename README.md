@@ -1,6 +1,6 @@
 # Srotas
 
-A hobby-grade, synthesis-ready RISC-V processor implementing the **RV32I
+A synthesis-ready RISC-V processor implementing the **RV32I
 base integer ISA** with a classic 5-stage in-order pipeline —
 **IF → ID → EX → MEM → WB** — full data forwarding, load-use hazard
 stalling, and branch/jump resolution with pipeline squash.
