@@ -1,148 +1,101 @@
 // ============================================================================
-// Module: data_memory.v
-// Stage:  MEM (Memory Access)
-// Project: Srotas - 5-Stage RISC-V Processor
-// Day:    4
+// Module: data_memory
+// File: data_memory.v
+// Stage: MEM
 //
-// Description:
-//   Simulates Data Memory for Load/Store operations.
-//   Supports byte, half-word, and word access.
-//   In a real system, this would be SRAM or connected to a memory controller.
+// Byte-addressable data RAM with byte/half/word load and store support
+// (signed and unsigned loads), little-endian, matching RV32I semantics.
 //
-// Features:
-//   - 32-bit address bus
-//   - 32-bit data input/output
-//   - Byte-enable support for LB, LH, LW, SB, SH, SW
-//   - Synchronous read/write (single clock cycle)
-//   - 4KB memory size (expandable)
+// Read is combinational (asynchronous) so the loaded value is available
+// within the same cycle the address is presented, matching the timing of
+// every other combinational stage output feeding the MEM/WB register -
+// registering the read here would add a spurious extra cycle of latency
+// that would desync the load data from the rd/control signals traveling
+// alongside it.
 //
-// Interface:
-//   - clk: Clock signal
-//   - rst_n: Active-low reset
-//   - mem_addr: Address from EX/MEM register
-//   - mem_write_data: Data to write from EX/MEM register
-//   - mem_read: Read enable signal
-//   - mem_write: Write enable signal
-//   - mem_func3: Function code for access size (3 bits)
-//   - mem_read_data: Data read from memory
+// Deliberately has no reset on the memory array: an active reset touching
+// every byte of a multi-KB array will not infer as Block RAM in Vivado (it
+// forces distributed/register-based memory instead), which defeats the
+// point of using a RAM primitive on an FPGA. Initial contents are zero in
+// simulation and don't-care/BRAM-default on hardware; students who need a
+// preloaded data segment can use DMEM_INIT_FILE.
 // ============================================================================
 
-module data_memory (
+`timescale 1ns/1ps
+`include "rv32i_defines.vh"
+
+module data_memory #(
+    parameter integer MEM_BYTES  = 16384, // 16KB data memory
+    parameter         INIT_FILE  = ""     // optional $readmemh preload (hex bytes)
+) (
     input  wire        clk,
     input  wire        rst_n,
-    
-    // Address and data from EX stage
+
     input  wire [31:0] mem_addr,
     input  wire [31:0] mem_write_data,
-    
-    // Control signals
-    input  wire        mem_read,      // MemRead control signal
-    input  wire        mem_write,     // MemWrite control signal
-    input  wire [2:0]  mem_func3,     // Access size: 000(LB), 001(LH), 010(LW), 100(SB), 101(SH), 011(SW)
-    
-    // Output to WB stage
+    input  wire        mem_read,
+    input  wire        mem_write,
+    input  wire [2:0]  funct3,
+
     output reg  [31:0] mem_read_data
 );
 
-    // Memory parameters
-    localparam MEM_SIZE = 4096;  // 4KB memory
-    localparam ADDR_WIDTH = 12;  // log2(4096) = 12 bits
-    
-    // Memory array (byte-addressable)
-    reg [7:0] memory [0:MEM_SIZE-1];
-    
-    // Internal signals
-    wire [ADDR_WIDTH-1:0] aligned_addr;
-    wire [31:0] word_data;
-    
-    // Align address to word boundary for indexing
-    assign aligned_addr = mem_addr[ADDR_WIDTH+1:2];  // Ignore lower 2 bits for word alignment
-    
-    // =========================================================================
-    // WRITE OPERATION
-    // =========================================================================
-    always @(posedge clk or negedge rst_n) begin
-        if (!rst_n) begin
-            // Initialize memory to zero on reset (optional, for simulation)
-            integer i;
-            for (i = 0; i < MEM_SIZE; i = i + 1) begin
-                memory[i] <= 8'd0;
-            end
-        end
-        else if (mem_write) begin
-            case (mem_func3)
-                3'b100: begin // SB - Store Byte
-                    memory[mem_addr[ADDR_WIDTH-1:0]] <= mem_write_data[7:0];
-                end
-                3'b101: begin // SH - Store Half-word
-                    memory[mem_addr[ADDR_WIDTH-1:0]] <= mem_write_data[7:0];
-                    memory[mem_addr[ADDR_WIDTH-1:0] + 1'b1] <= mem_write_data[15:8];
-                end
-                3'b011: begin // SW - Store Word
-                    memory[mem_addr[ADDR_WIDTH-1:0]] <= mem_write_data[7:0];
-                    memory[mem_addr[ADDR_WIDTH-1:0] + 1'b1] <= mem_write_data[15:8];
-                    memory[mem_addr[ADDR_WIDTH-1:0] + 2'b10] <= mem_write_data[23:16];
-                    memory[mem_addr[ADDR_WIDTH-1:0] + 2'b11] <= mem_write_data[31:24];
-                end
-                default: begin
-                    // Invalid store operation
-                end
-            endcase
-        end
+    localparam ADDR_BITS = $clog2(MEM_BYTES);
+
+    reg [7:0] memory [0:MEM_BYTES-1];
+
+    wire [ADDR_BITS-1:0] addr0 = mem_addr[ADDR_BITS-1:0];
+    wire [ADDR_BITS-1:0] addr1 = addr0 + 32'd1;
+    wire [ADDR_BITS-1:0] addr2 = addr0 + 32'd2;
+    wire [ADDR_BITS-1:0] addr3 = addr0 + 32'd3;
+
+    initial begin
+        if (INIT_FILE != "")
+            $readmemh(INIT_FILE, memory);
     end
-    
-    // =========================================================================
-    // READ OPERATION
-    // =========================================================================
-    always @(posedge clk or negedge rst_n) begin
-        if (!rst_n) begin
-            mem_read_data <= 32'd0;
-        end
-        else if (mem_read) begin
-            case (mem_func3)
-                3'b000: begin // LB - Load Byte (signed)
-                    mem_read_data <= {{24{memory[mem_addr[ADDR_WIDTH-1:0]][7]}}, memory[mem_addr[ADDR_WIDTH-1:0]]};
-                end
-                3'b001: begin // LH - Load Half-word (signed)
-                    mem_read_data <= {{16{memory[mem_addr[ADDR_WIDTH-1:0] + 1'b1][7]}}, 
-                                      memory[mem_addr[ADDR_WIDTH-1:0] + 1'b1], 
-                                      memory[mem_addr[ADDR_WIDTH-1:0]]};
-                end
-                3'b010: begin // LW - Load Word
-                    mem_read_data <= {memory[mem_addr[ADDR_WIDTH-1:0] + 2'b11],
-                                      memory[mem_addr[ADDR_WIDTH-1:0] + 2'b10],
-                                      memory[mem_addr[ADDR_WIDTH-1:0] + 1'b1],
-                                      memory[mem_addr[ADDR_WIDTH-1:0]]};
-                end
-                3'b100: begin // LBU - Load Byte Unsigned
-                    mem_read_data <= {24'd0, memory[mem_addr[ADDR_WIDTH-1:0]]};
-                end
-                3'b101: begin // LHU - Load Half-word Unsigned
-                    mem_read_data <= {16'd0, 
-                                      memory[mem_addr[ADDR_WIDTH-1:0] + 1'b1], 
-                                      memory[mem_addr[ADDR_WIDTH-1:0]]};
-                end
-                default: begin
-                    mem_read_data <= 32'd0; // Invalid load
-                end
-            endcase
-        end
-        else begin
-            mem_read_data <= mem_read_data; // Hold previous value
-        end
-    end
-    
-    // =========================================================================
-    // DEBUG: Display memory access (for simulation)
-    // =========================================================================
-    `ifdef DEBUG
+
+    // -----------------------------------------------------------------
+    // Write (synchronous)
+    // -----------------------------------------------------------------
     always @(posedge clk) begin
-        if (mem_read) begin
-            $display("[%0t] MEM READ: addr=%h, func3=%b, data=%h", $time, mem_addr, mem_func3, mem_read_data);
-        end
         if (mem_write) begin
-            $display("[%0t] MEM WRITE: addr=%h, func3=%b, data=%h", $time, mem_addr, mem_func3, mem_write_data);
+            case (funct3)
+                3'b000: begin // SB
+                    memory[addr0] <= mem_write_data[7:0];
+                end
+                3'b001: begin // SH
+                    memory[addr0] <= mem_write_data[7:0];
+                    memory[addr1] <= mem_write_data[15:8];
+                end
+                3'b010: begin // SW
+                    memory[addr0] <= mem_write_data[7:0];
+                    memory[addr1] <= mem_write_data[15:8];
+                    memory[addr2] <= mem_write_data[23:16];
+                    memory[addr3] <= mem_write_data[31:24];
+                end
+                default: ; // invalid store width: no-op
+            endcase
         end
+    end
+
+    // -----------------------------------------------------------------
+    // Read (combinational)
+    // -----------------------------------------------------------------
+    always @(*) begin
+        case (funct3)
+            `FUNCT3_LB:  mem_read_data = {{24{memory[addr0][7]}}, memory[addr0]};
+            `FUNCT3_LH:  mem_read_data = {{16{memory[addr1][7]}}, memory[addr1], memory[addr0]};
+            `FUNCT3_LW:  mem_read_data = {memory[addr3], memory[addr2], memory[addr1], memory[addr0]};
+            `FUNCT3_LBU: mem_read_data = {24'b0, memory[addr0]};
+            `FUNCT3_LHU: mem_read_data = {16'b0, memory[addr1], memory[addr0]};
+            default:     mem_read_data = 32'b0;
+        endcase
+    end
+
+    `ifdef SROTAS_DEBUG
+    always @(posedge clk) begin
+        if (mem_write)
+            $display("[%0t] MEM WRITE addr=0x%08h data=0x%08h funct3=%b", $time, mem_addr, mem_write_data, funct3);
     end
     `endif
 

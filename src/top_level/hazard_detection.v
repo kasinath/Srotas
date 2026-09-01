@@ -1,70 +1,80 @@
 // ============================================================================
-// Module: Hazard Detection Unit
+// Module: hazard_detection_unit
 // File: hazard_detection.v
-// Project: Srotas RISC-V Processor - Day 5
-// 
-// Description:
-//   Detects data hazards and generates stall/flush signals.
-//   This is a simplified hazard detection unit for learning purposes.
+// Project: Srotas RISC-V Processor
 //
-// Types of Hazards Handled:
-//   1. Load-Use Hazard: Stall when instruction in EX needs data from load in MEM
-//   2. Branch Hazard: Flush when branch is taken (simple approach)
+// Combined hazard-stall and data-forwarding controller.
 //
-// Note: A production processor would use forwarding paths to avoid stalls.
-//       We're implementing basic stalling for educational clarity.
+// 1) Load-use hazard: the instruction about to enter EX (held in the ID/EX
+//    register) is a load, and the instruction currently in ID needs that
+//    register. Load data isn't ready until MEM completes, so forwarding
+//    can't fix this - the pipeline stalls for exactly one cycle by
+//    freezing PC and IF/ID and inserting a bubble into ID/EX.
+//
+// 2) EX/MEM and MEM/WB forwarding: for every other RAW hazard distance,
+//    the operand is forwarded combinationally into the EX stage instead of
+//    stalling - forward_a/forward_b select between the un-forwarded ID/EX
+//    value (2'b00), the result of the instruction one stage ahead, in MEM
+//    (2'b01), or two stages ahead, in WB (2'b10). EX/MEM (the closer
+//    producer) wins if both would otherwise match.
+//
+// 3) Branch/jump misprediction: resolved combinationally in EX. Squashes
+//    the two wrong-path instructions already fetched (currently in IF and
+//    ID) by flushing IF/ID and ID/EX the same cycle the redirect fires.
 // ============================================================================
 
+`timescale 1ns/1ps
+
 module hazard_detection_unit (
-    // From ID/EX pipeline register
-    input wire [4:0] id_ex_rs1,           // Source register 1
-    input wire [4:0] id_ex_rs2,           // Source register 2
-    input wire id_ex_reg_write,           // Will this instruction write?
-    input wire [4:0] id_ex_rd,            // Destination register
-    
-    // From EX/MEM pipeline register
-    input wire ex_mem_mem_read,           // Is this a load instruction?
-    input wire [4:0] ex_mem_rd,           // Destination of load
-    
-    // From MEM/WB pipeline register
-    input wire mem_wb_reg_write,          // Will WB stage write?
-    input wire [4:0] mem_wb_rd,           // Destination register in WB
-    
-    // Control outputs
-    output wire pc_src,                   // Stall PC (hold current value)
-    output wire if_id_flush,              // Flush IF/ID register
-    output wire id_ex_stall               // Stall ID/EX register
+    // Instruction currently in ID (about to be latched into ID/EX)
+    input  wire [4:0] id_rs1_addr,
+    input  wire [4:0] id_rs2_addr,
+
+    // Instruction currently in EX (ID/EX register outputs)
+    input  wire [4:0] id_ex_rs1_addr,
+    input  wire [4:0] id_ex_rs2_addr,
+    input  wire [4:0] id_ex_rd_addr,
+    input  wire       id_ex_mem_read,
+
+    // Instruction currently in MEM (EX/MEM register outputs)
+    input  wire [4:0] ex_mem_rd_addr,
+    input  wire       ex_mem_reg_write,
+
+    // Instruction currently in WB (MEM/WB register outputs)
+    input  wire [4:0] mem_wb_rd_addr,
+    input  wire       mem_wb_reg_write,
+
+    // Branch/jump resolution, combinational from EX this cycle
+    input  wire       ex_redirect,
+
+    // Pipeline control
+    output wire        pc_write_en,
+    output wire        if_id_write_en,
+    output wire        if_id_flush,
+    output wire        id_ex_flush,
+
+    // Forwarding selects for the EX stage
+    output wire [1:0]  forward_a,
+    output wire [1:0]  forward_b
 );
 
-    // =========================================================================
-    // Load-Use Hazard Detection
-    // If instruction in EX is a LOAD, and next instruction (in ID) needs that
-    // data, we need to STALL for one cycle.
-    // =========================================================================
-    wire load_use_hazard;
-    
-    assign load_use_hazard = 
-        ex_mem_mem_read && (
-            (id_ex_rs1 == ex_mem_rd && id_ex_rs1 != 5'b0) ||  // rs1 matches load rd
-            (id_ex_rs2 == ex_mem_rd && id_ex_rs2 != 5'b0)     // rs2 matches load rd
-        );
-    
-    // =========================================================================
-    // Simple Branch Flush (can be enhanced with branch prediction later)
-    // For now, we'll handle this in the control unit
-    // =========================================================================
-    
-    // =========================================================================
-    // Control Signal Generation
-    // =========================================================================
-    
-    // Stall signal: Assert when load-use hazard detected
-    assign id_ex_stall = load_use_hazard;
-    
-    // PC source: Hold PC when stalled
-    assign pc_src = load_use_hazard;
-    
-    // Flush IF/ID when stalled (don't fetch new instruction)
-    assign if_id_flush = load_use_hazard;
+    wire load_use_hazard =
+        id_ex_mem_read && (id_ex_rd_addr != 5'd0) &&
+        ((id_ex_rd_addr == id_rs1_addr) || (id_ex_rd_addr == id_rs2_addr));
+
+    assign pc_write_en    = !load_use_hazard;
+    assign if_id_write_en = !load_use_hazard;
+    assign if_id_flush    = ex_redirect;
+    assign id_ex_flush    = load_use_hazard || ex_redirect;
+
+    assign forward_a =
+        (ex_mem_reg_write && (ex_mem_rd_addr != 5'd0) && (ex_mem_rd_addr == id_ex_rs1_addr)) ? 2'b01 :
+        (mem_wb_reg_write && (mem_wb_rd_addr != 5'd0) && (mem_wb_rd_addr == id_ex_rs1_addr)) ? 2'b10 :
+        2'b00;
+
+    assign forward_b =
+        (ex_mem_reg_write && (ex_mem_rd_addr != 5'd0) && (ex_mem_rd_addr == id_ex_rs2_addr)) ? 2'b01 :
+        (mem_wb_reg_write && (mem_wb_rd_addr != 5'd0) && (mem_wb_rd_addr == id_ex_rs2_addr)) ? 2'b10 :
+        2'b00;
 
 endmodule

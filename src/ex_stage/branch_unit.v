@@ -1,65 +1,58 @@
-/**
- * Branch Unit - Execute Stage Branch Logic
- * 
- * This module determines if a branch should be taken based on:
- * - The branch type (BEQ, BNE, BLT, BGE, BLTU, BGEU)
- * - The ALU zero flag and sign comparisons
- * 
- * It calculates the branch target address for taken branches.
- * 
- * @author Srotas Project
- * @day Day 3 - Execute Stage
- */
+// ============================================================================
+// Module: branch_unit
+// File: branch_unit.v
+// Stage: EX
+//
+// Resolves conditional branches and computes the redirect target for taken
+// branches, JAL, and JALR.
+//
+// The control unit already steers alu_op to SUB for BEQ/BNE, SLT for
+// BLT/BGE, and SLTU for BLTU/BGEU - so the ALU's result already *is* the
+// comparison we need (zero flag for equality, result bit 0 for less-than).
+// No separate/duplicated comparator is needed, and unlike a "reuse the sign
+// bit" shortcut, this is correct for the unsigned cases too.
+//
+// Targets:
+//   - Branch taken / JAL : pc + imm      (PC-relative)
+//   - JALR               : (rs1 + imm) & ~1, which is exactly alu_result
+//                           with the LSB cleared, since the ALU already
+//                           computed rs1+imm for a JALR instruction.
+// ============================================================================
+
+`timescale 1ns/1ps
+`include "rv32i_defines.vh"
 
 module branch_unit (
-    input wire [31:0] pc,               // Current PC value
-    input wire [31:0] imm,              // Sign-extended immediate (already shifted left by 1)
-    input wire        zero,             // ALU zero flag (for BEQ/BNE)
-    input wire        sign,             // Sign of result (for signed comparisons)
-    input wire [2:0]  branch_type,      // Type of branch instruction
-                                        // 000: BEQ  - Branch if Equal
-                                        // 001: BNE  - Branch if Not Equal
-                                        // 100: BLT  - Branch if Less Than (signed)
-                                        // 101: BGE  - Branch if Greater or Equal (signed)
-                                        // 110: BLTU - Branch if Less Than (unsigned)
-                                        // 111: BGEU - Branch if Greater or Equal (unsigned)
-    output reg        branch_taken,     // High if branch condition is met
-    output reg [31:0] branch_target     // Target address if branch is taken
+    input  wire [31:0] pc,
+    input  wire [31:0] imm,
+    input  wire [31:0] alu_result,
+    input  wire        alu_zero,
+    input  wire [2:0]  funct3,
+    input  wire        branch,
+    input  wire        jump,
+    input  wire        is_jalr,
+
+    output wire        redirect,       // 1 = PC must be redirected & flush 2 stages
+    output wire [31:0] redirect_target
 );
 
-    // Calculate branch target address: PC + immediate
-    // Note: The immediate from ID stage is already shifted left by 1 (for half-word alignment)
-    assign branch_target = pc + imm;
-
-    // Determine if branch should be taken based on branch type and flags
+    reg branch_taken;
     always @(*) begin
-        branch_taken = 1'b0;  // Default: don't take branch
-        
-        case (branch_type)
-            // BEQ: Branch if Equal (zero flag set)
-            3'b000: branch_taken = zero;
-            
-            // BNE: Branch if Not Equal (zero flag not set)
-            3'b001: branch_taken = ~zero;
-            
-            // BLT: Branch if Less Than (signed)
-            // Taken when sign bit is 1 (negative result)
-            3'b100: branch_taken = sign;
-            
-            // BGE: Branch if Greater or Equal (signed)
-            // Taken when sign bit is 0 (positive or zero result)
-            3'b101: branch_taken = ~sign;
-            
-            // BLTU: Branch if Less Than (unsigned)
-            // For unsigned comparison, we need to check borrow
-            // This is handled by checking if operand_a < operand_b in ALU
-            3'b110: branch_taken = sign;  // Reusing sign flag for simplicity
-            
-            // BGEU: Branch if Greater or Equal (unsigned)
-            3'b111: branch_taken = ~sign;
-            
-            default: branch_taken = 1'b0;
+        case (funct3)
+            `FUNCT3_BEQ:  branch_taken = alu_zero;
+            `FUNCT3_BNE:  branch_taken = ~alu_zero;
+            `FUNCT3_BLT:  branch_taken = alu_result[0];
+            `FUNCT3_BGE:  branch_taken = ~alu_result[0];
+            `FUNCT3_BLTU: branch_taken = alu_result[0];
+            `FUNCT3_BGEU: branch_taken = ~alu_result[0];
+            default:      branch_taken = 1'b0;
         endcase
     end
+
+    wire [31:0] pc_rel_target = pc + imm;
+    wire [31:0] jalr_target   = {alu_result[31:1], 1'b0};
+
+    assign redirect_target = is_jalr ? jalr_target : pc_rel_target;
+    assign redirect        = jump || (branch && branch_taken);
 
 endmodule

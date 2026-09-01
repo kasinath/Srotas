@@ -1,3 +1,13 @@
+> **Note:** this entry documents the original Day 5 integration as it stood
+> at the end of the 5-day build. A later correctness pass found that the
+> stage modules' port lists didn't actually match how this file wired them
+> together (so the design didn't compile as-is), there was no data
+> forwarding, hazard detection compared the wrong pipeline stages, branches
+> never redirected the PC, and the register file's write port was never
+> connected. See `docs/day6_correctness_pass.md` for what changed. The
+> architecture description and diagrams below are still accurate for the
+> corrected design.
+
 # 🎉 Day 5 Complete! The Grand Finale - Srotas Processor is Born!
 
 ## 🏆 Congratulations! You've Built a Complete 5-Stage RISC-V Processor!

@@ -1,99 +1,71 @@
 // ============================================================================
-// Module: mem_stage_top.v
-// Stage:  MEM (Memory Access) - Top Level
-// Project: Srotas - 5-Stage RISC-V Processor
-// Day:    4
+// Module: mem_stage_top
+// File: mem_stage_top.v
+// Stage: MEM (Memory Access)
 //
-// Description:
-//   Top-level module for the Memory Access stage.
-//   Integrates data memory and MEM/WB pipeline register.
-//
-// Functionality:
-//   1. Receives data from EX/MEM register
-//   2. Performs memory read/write if needed
-//   3. Passes results to MEM/WB register for WB stage
-//
-// Instructions handled:
-//   - LOAD: LB, LH, LW, LBU, LHU (read from memory)
-//   - STORE: SB, SH, SW (write to memory)
-//   - Other instructions pass through without memory access
-//
-// Interface:
-//   - Inputs from EX/MEM pipeline register
-//   - Outputs to MEM/WB pipeline register
+// Integrates data memory and the MEM/WB pipeline register.
 // ============================================================================
 
-module mem_stage_top (
+`timescale 1ns/1ps
+
+module mem_stage_top #(
+    parameter integer DMEM_BYTES = 16384,
+    parameter         DMEM_INIT_FILE = ""
+) (
     input  wire        clk,
     input  wire        rst_n,
-    input  wire        stall,
-    input  wire        flush,
-    
-    // Inputs from EX/MEM register
-    input  wire [31:0] ex_mem_alu_result,   // ALU result (address for load/store)
-    input  wire [31:0] ex_mem_write_data,   // Data to store in memory
-    input  wire [4:0]  ex_mem_rd,           // Destination register index
-    input  wire        ex_mem_reg_write,    // Register write enable
-    input  wire        ex_mem_mem_read,     // Memory read enable
-    input  wire        ex_mem_mem_write,    // Memory write enable
-    input  wire [2:0]  ex_mem_func3,        // Function code for access size
-    input  wire        ex_mem_mem_to_reg,   // Select memory data vs ALU result
-    
-    // Outputs to MEM/WB register
-    output wire [31:0] mem_wb_result,
-    output wire [31:0] mem_wb_read_data,
-    output wire [4:0]  mem_wb_rd,
-    output wire        mem_wb_reg_write,
-    output wire        mem_wb_mem_to_reg
+
+    input  wire [31:0] ex_pc_plus4,
+    input  wire [31:0] ex_alu_result,
+    input  wire [31:0] ex_mem_write_data,
+    input  wire [4:0]  ex_rd_addr,
+    input  wire [2:0]  ex_funct3,
+    input  wire        ex_reg_write,
+    input  wire        ex_mem_read,
+    input  wire        ex_mem_write,
+    input  wire [1:0]  ex_result_src,
+
+    output wire [31:0] wb_pc_plus4,
+    output wire [31:0] wb_alu_result,
+    output wire [31:0] wb_mem_read_data,
+    output wire [4:0]  wb_rd_addr,
+    output wire        wb_reg_write,
+    output wire [1:0]  wb_result_src
 );
 
-    // Internal wires
     wire [31:0] mem_read_data;
-    
-    // =========================================================================
-    // Data Memory Instance
-    // =========================================================================
-    data_memory u_data_memory (
+
+    data_memory #(
+        .MEM_BYTES (DMEM_BYTES),
+        .INIT_FILE (DMEM_INIT_FILE)
+    ) u_data_memory (
         .clk            (clk),
         .rst_n          (rst_n),
-        .mem_addr       (ex_mem_alu_result),   // Address from ALU
-        .mem_write_data (ex_mem_write_data),   // Data to write
-        .mem_read       (ex_mem_mem_read),     // Read enable
-        .mem_write      (ex_mem_mem_write),    // Write enable
-        .mem_func3      (ex_mem_func3),        // Access size
-        .mem_read_data  (mem_read_data)        // Data read from memory
+        .mem_addr       (ex_alu_result),
+        .mem_write_data (ex_mem_write_data),
+        .mem_read       (ex_mem_read),
+        .mem_write      (ex_mem_write),
+        .funct3         (ex_funct3),
+        .mem_read_data  (mem_read_data)
     );
-    
-    // =========================================================================
-    // Result Selection Logic
-    // For non-memory instructions, pass ALU result
-    // For load instructions, this will be overridden by mem_to_reg mux in WB
-    // =========================================================================
-    wire [31:0] selected_result;
-    assign selected_result = ex_mem_alu_result;
-    
-    // =========================================================================
-    // MEM/WB Pipeline Register Instance
-    // =========================================================================
+
     mem_wb_register u_mem_wb_register (
         .clk            (clk),
         .rst_n          (rst_n),
-        .stall          (stall),
-        .flush          (flush),
-        
-        // Inputs from MEM stage logic
-        .mem_result     (selected_result),
+
+        .pc_plus4       (ex_pc_plus4),
+        .alu_result     (ex_alu_result),
         .mem_read_data  (mem_read_data),
-        .mem_rd         (ex_mem_rd),
-        .mem_reg_write  (ex_mem_reg_write),
-        .mem_mem_to_reg (ex_mem_mem_to_reg),
-        
-        // Outputs to WB stage
-        .wb_result      (mem_wb_result),
-        .wb_read_data   (mem_wb_read_data),
-        .wb_rd          (mem_wb_rd),
-        .wb_reg_write   (mem_wb_reg_write),
-        .wb_mem_to_reg  (mem_wb_mem_to_reg)
+        .rd_addr        (ex_rd_addr),
+        .reg_write      (ex_reg_write),
+        .result_src     (ex_result_src),
+
+        .pc_plus4_out      (wb_pc_plus4),
+        .alu_result_out    (wb_alu_result),
+        .mem_read_data_out (wb_mem_read_data),
+        .rd_addr_out       (wb_rd_addr),
+        .reg_write_out     (wb_reg_write),
+        .result_src_out    (wb_result_src)
     );
 
 endmodule
