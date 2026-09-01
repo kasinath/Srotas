@@ -451,8 +451,3 @@ those extensions.
 - No M-extension (multiply/divide) or C-extension (compressed instructions).
 - Single outstanding memory access per cycle, no caches.
 
-## Credits
-
-Built as a 5-day learning project (`docs/day1_summary.md` –
-`day5_summary.md`), then corrected and verified end-to-end
-(`docs/day6_correctness_pass.md`).
