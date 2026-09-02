@@ -18,9 +18,22 @@
 //    (2'b01), or two stages ahead, in WB (2'b10). EX/MEM (the closer
 //    producer) wins if both would otherwise match.
 //
-// 3) Branch/jump misprediction: resolved combinationally in EX. Squashes
-//    the two wrong-path instructions already fetched (currently in IF and
-//    ID) by flushing IF/ID and ID/EX the same cycle the redirect fires.
+// 3) Branch/jump/trap/mret redirect: resolved combinationally in EX (a
+//    trap - illegal instruction, ecall/ebreak, or a misaligned address -
+//    and mret drive the same ex_redirect signal a branch does; see
+//    ex_stage_top.v). Squashes the two wrong-path instructions already
+//    fetched (currently in IF and ID) by flushing IF/ID and ID/EX the same
+//    cycle the redirect fires.
+//
+//    pc_write_en must never be held low by a load-use stall while
+//    ex_redirect is asserted: a load can now be the very instruction
+//    causing the redirect (a misaligned load traps), so without this,
+//    a load-use hazard against whatever's in ID could block the PC from
+//    ever reaching the trap target. Before traps existed this could never
+//    happen - only a mem_read=0 instruction (a branch/jump) could redirect,
+//    and mem_read=1 is required for a load-use hazard, so the two
+//    conditions were mutually exclusive by construction. That's no longer
+//    true once a load itself can trap.
 // ============================================================================
 
 `timescale 1ns/1ps
@@ -62,7 +75,7 @@ module hazard_detection_unit (
         id_ex_mem_read && (id_ex_rd_addr != 5'd0) &&
         ((id_ex_rd_addr == id_rs1_addr) || (id_ex_rd_addr == id_rs2_addr));
 
-    assign pc_write_en    = !load_use_hazard;
+    assign pc_write_en    = !load_use_hazard || ex_redirect;
     assign if_id_write_en = !load_use_hazard;
     assign if_id_flush    = ex_redirect;
     assign id_ex_flush    = load_use_hazard || ex_redirect;

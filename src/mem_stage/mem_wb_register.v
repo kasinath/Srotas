@@ -17,6 +17,7 @@ module mem_wb_register (
     input  wire [31:0] alu_result,
     input  wire [31:0] mem_read_data,
     input  wire [4:0]  rd_addr,
+    input  wire [31:0] csr_rdata,
     input  wire        reg_write,
     input  wire [1:0]  result_src,
 
@@ -24,6 +25,7 @@ module mem_wb_register (
     output reg  [31:0] alu_result_out,
     output reg  [31:0] mem_read_data_out,
     output reg  [4:0]  rd_addr_out,
+    output reg  [31:0] csr_rdata_out,
     output reg         reg_write_out,
     output reg  [1:0]  result_src_out
 );
@@ -34,6 +36,7 @@ module mem_wb_register (
             alu_result_out    <= 32'b0;
             mem_read_data_out <= 32'b0;
             rd_addr_out       <= 5'b0;
+            csr_rdata_out     <= 32'b0;
             reg_write_out     <= 1'b0;
             result_src_out    <= 2'b0;
         end else begin
@@ -41,6 +44,7 @@ module mem_wb_register (
             alu_result_out    <= alu_result;
             mem_read_data_out <= mem_read_data;
             rd_addr_out       <= rd_addr;
+            csr_rdata_out     <= csr_rdata;
             reg_write_out     <= reg_write;
             result_src_out    <= result_src;
         end

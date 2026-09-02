@@ -3,9 +3,8 @@
 This document walks through every module in the Srotas RISC-V processor,
 stage by stage, explaining not just what each piece does but *why it exists*
 and why it's built the way it is. It replaces the original day-by-day build
-log (`day1_summary.md` – `day5_summary.md`) with a single reference that
-describes the processor as it actually is today, after the correctness pass
-documented in `day6_correctness_pass.md`.
+log with a single reference that's kept up to date as the processor grows —
+see [`docs/roadmap.md`](roadmap.md) for where it's headed next.
 
 If you just want a quick architectural overview and the datapath diagram,
 see the "Architecture" section of the top-level `README.md` — this document
@@ -15,8 +14,10 @@ goes deeper, module by module, for anyone extending or debugging the design.
 
 Srotas implements the **RV32I base integer ISA** — the smallest complete
 RISC-V instruction set, 47 instructions covering arithmetic, logic, shifts,
-loads/stores, branches, and jumps — as a **classic 5-stage in-order
-pipeline**:
+loads/stores, branches, and jumps — plus **Zicsr** (the six CSR
+read/modify/write instructions) and **M-mode exception handling**
+(`ecall`/`ebreak`/`mret`, illegal instructions, and misaligned addresses),
+as a **classic 5-stage in-order pipeline**:
 
 ```
 IF (Fetch) -> ID (Decode) -> EX (Execute) -> MEM (Memory) -> WB (Writeback)
@@ -116,7 +117,7 @@ to ID.
 - **`pc_register.v`** — the Program Counter. A single 32-bit register,
   reset to `0x00000000`, that holds the address currently being fetched. It
   only has one piece of extra behavior: `pc_write_en`. When a load-use
-  hazard is detected (Section 7), the PC must *not* advance, so the same
+  hazard is detected (Section 6), the PC must *not* advance, so the same
   instruction is presented again next cycle instead of skipping ahead while
   the pipeline is stalled.
 
@@ -203,20 +204,53 @@ and build the sign-extended immediate.
     leaves every control signal at its safe, no-side-effect default
     (`reg_write = 0`, `mem_read/write = 0`, etc.) — an unimplemented
     instruction behaves as an inert NOP rather than corrupting state,
-    which matters because RV32I doesn't include compressed, M-extension,
-    or CSR opcodes, and encountering one shouldn't silently misbehave.
+    which matters because RV32I doesn't include compressed or
+    M-extension opcodes, and encountering one shouldn't silently
+    misbehave.
+  - **CSR instructions** (`csrrw`/`csrrs`/`csrrc` and their `_i` immediate
+    forms, all under `OP_SYSTEM`) decode into `result_src = RESULT_CSR`
+    plus two CSR-specific signals: `csr_op` (`funct3[1:0]`, directly
+    giving write/set/clear regardless of register-vs-immediate form) and
+    `csr_use_imm` (`funct3[2]`, 1 for the `_i` forms).
+  - **`ecall`/`ebreak`/`mret`** share `OP_SYSTEM` with the CSR
+    instructions but are distinguished by `funct3 == 000` together with
+    the `imm[11:0]` field (the same bits as a CSR address, reused here
+    for their fixed bit patterns: `0x000`/`0x001`/`0x302`). `wfi`
+    (`0x105`) decodes as a deliberate NOP — a legal implementation choice
+    per the RISC-V spec, since there's no interrupt yet to wait for.
+    Anything else in this space (`sfence.vma`, or garbage) sets
+    `illegal`, alongside the outer `default` case for any entirely
+    unrecognized opcode. All four of `ecall`/`ebreak`/`mret`/`illegal` are
+    only *classified* here — control_unit.v has no notion of a PC
+    redirect or squash; that happens in EX (Section 5), the same way a
+    branch's `taken`/`not-taken` classification here doesn't resolve the
+    branch itself.
+  - **`FENCE`/`FENCE.I`** (`OP_MISC_MEM`, base RV32I and Zifencei
+    respectively) get their own case that leaves every signal at its
+    default and does *not* set `illegal` — a single in-order hart with no
+    caches has no memory reordering to fence and no instruction cache to
+    invalidate, so both are true no-ops here, not merely unimplemented.
+    This closed a real gap rather than adding a cosmetic one: `FENCE` is
+    base-ISA, so before this opcode had its own case it fell into the
+    `default` branch below and would have wrongly trapped as illegal — a
+    compliant base RV32I instruction excepting is a correctness bug, not
+    a scope limitation.
 
 - **`id_ex_register.v`** — the pipeline register into EX. Its `flush`
   behavior is more selective than `if_id_register`'s: it zeros out only the
   *control* signals (`reg_write`, `mem_read`, `mem_write`, `branch`,
-  `jump`, `is_jalr`, `result_src`) and leaves data fields (registers,
-  immediate, PC) untouched. A "bubble" only needs to look like a NOP to the
-  rest of the pipeline — and an instruction is architecturally inert the
-  moment none of its control signals can cause a write, a memory access, or
-  a redirect, regardless of what stale data bits happen to still be sitting
-  in the register. This one register handles two different reasons to
-  flush: a load-use stall bubble, and squashing whatever was decoded down
-  the wrong path of a branch.
+  `jump`, `is_jalr`, `result_src`, `csr_op`, `ecall`, `ebreak`, `mret`,
+  `illegal`) and leaves data fields (registers, immediate, PC,
+  `csr_use_imm`, `csr_addr`) untouched. A "bubble" only needs to look like
+  a NOP to the rest of the pipeline — and an instruction is
+  architecturally inert the moment none of its control signals can cause
+  a write, a memory access, or a redirect, regardless of what stale data
+  bits happen to still be sitting in the register. This one register
+  handles two different reasons to flush: a load-use stall bubble, and
+  squashing whatever was decoded down the wrong path of a branch — and,
+  as of the trap controller (Section 5), a third: a squashed `ecall` must
+  never be allowed to fire just because it happened to be sitting on a
+  mispredicted path.
 
 - **`id_stage_top.v`** — ties the above together and is also where the
   register file's write port gets connected. Note that the write address/
@@ -272,16 +306,94 @@ a branch or jump changes control flow.
   instruction slot, and the store-data path (`store_data = rs2_fwd`, the
   *forwarded* rs2 value) is kept deliberately separate so a store never
   accidentally writes an address offset to memory instead of the intended
-  data. This exact bug existed in the original Day 5 build (see
-  `day6_correctness_pass.md`).
+  data.
+
+- **`csr_file.v`** — the CSR register file, instantiated here in
+  `ex_stage_top.v` alongside the ALU and branch unit, since — like them —
+  it's a pure function of this stage's own inputs plus one cycle's worth
+  of state. It implements the minimal M-mode set needed for trap handling
+  (`mstatus`, `misa`, `mie`, `mtvec`, `mscratch`, `mepc`, `mcause`,
+  `mtval`, `mip`, plus the read-only `mvendorid`/`marchid`/`mimpid`/
+  `mhartid` identification group), with `mstatus`'s `MPP` field hardwired
+  to M-mode and `mtvec`'s mode field masked to Direct, since no privilege
+  modes or vectored dispatch exist yet. Its hardware trap-entry and
+  `mret` ports are now driven for real by the trap controller below.
+  - **The write operand** is the forwarded rs1 value for `csrrw`/`csrrs`/
+    `csrrc`, or the zero-extended 5-bit immediate packed into the
+    instruction's rs1 field for the `_i` forms — deliberately *not* the
+    forwarded value in that case, since that field isn't a register
+    reference for those encodings, and forwarding could otherwise
+    substitute in an unrelated register's value that happens to
+    numerically coincide with those 5 bits.
+  - **No forwarding is needed between two CSR instructions accessing the
+    same address**, even back to back: the write commits synchronously at
+    the same clock edge that moves the producing instruction from EX to
+    MEM, so a consumer reaching EX exactly one cycle later already sees
+    the update through `csr_file.v`'s own combinational read — the same
+    single-resource, single-stage structure that makes GPR-style
+    forwarding unnecessary here in the first place.
+  - **The old CSR value** (read the same cycle the new value is computed
+    and written — correctly matching the RV32I semantics that `rd`
+    receives the *pre*-modification value) is threaded onward through
+    `ex_mem_register.v`, exactly like the ALU result.
+
+- **The trap controller** — also lives in `ex_stage_top.v`, since every
+  condition it needs is already local to this stage:
+  - **`ecall`/`ebreak`/`illegal`** (classified in ID) pass straight
+    through combinationally — nothing more to compute.
+  - **Instruction-address-misaligned** fires whenever `branch_unit`
+    actually redirects (a taken branch or any jump — a not-taken branch
+    never checks its target) and bit `[1]` of the target is set. Bit `[0]`
+    is never checked: `branch_unit.v` already forces it to 0 for `JALR`,
+    and B-type/J-type immediates always have it 0 by construction
+    (Section 2), so bit 1 is the only bit that can make a target
+    something other than 4-byte aligned — exactly what `IALIGN=32` (no C
+    extension) requires.
+  - **Load/store-address-misaligned** comes from `alu_result` (the
+    memory address) and `funct3`, gated on `mem_read`/`mem_write`: byte
+    accesses are never misaligned, half-word needs bit `[0]=0`, word
+    needs bits `[1:0]=00`. Loads and stores share the same width encoding
+    in `funct3` (000/001/010 = byte/half/word), so one check covers both,
+    distinguishing the two only for which cause code to report.
+  - **These conditions are mutually exclusive per instruction by
+    construction**, not by coincidence checked at runtime: a CSR
+    instruction can never also be a branch; `ecall`/`ebreak`/`illegal`
+    never set `mem_read`/`mem_write`/`branch`/`jump`; and only one of
+    branch/jump vs. load/store can ever be true for a single instruction.
+    So there's no real priority conflict between them to resolve — the
+    `if`/`else if` chain choosing `trap_cause`/`trap_value` is just
+    picking out whichever one condition is actually true.
+  - **A trapping instruction completes none of its normal effects.**
+    `reg_write`/`mem_read`/`mem_write` are ANDed with `!trap_taken`
+    before reaching `ex_mem_register.v`, becoming architecturally inert
+    the same way a squashed or load-use-bubbled instruction already is.
+    This matters concretely for a misaligned `JAL`/`JALR` (which would
+    otherwise still write its link value) and a misaligned store (which
+    would otherwise still corrupt memory) — a misaligned *load* would be
+    caught anyway, since suppressing `reg_write` means nothing ever lands
+    in `rd`, but a store has no register result, so a bug in this
+    suppression is only visible by reading memory back afterward (see
+    Section 10's note on `tb_isa_directed.v` Section L). `csr_op` needs
+    no equivalent AND-gate: a CSR instruction can never simultaneously be
+    illegal, `ecall`/`ebreak`, or an address computation, so
+    `csr_write_en` and `trap_taken` are already mutually exclusive by
+    construction.
+  - **The resulting redirect reuses the exact same `redirect`/
+    `redirect_target` outputs a plain branch already drives** — this is
+    the "reuse, don't rebuild, the squash path" idea from
+    `docs/roadmap.md`, Phase 1, made concrete: trap entry (target
+    `mtvec_q`) and `mret` (target `mepc_q`) both take priority over an
+    ordinary branch/jump redirect, since a trapping branch/jump must
+    never also be allowed to redirect to its own (possibly bad) target.
 
 - **`ex_mem_register.v`** — pipeline register into MEM. Carries the ALU
-  result, the store data, the destination register, and every control
-  signal MEM/WB will need.
+  result, the store data, the old CSR value, the destination register, and
+  every control signal MEM/WB will need.
 
 - **`ex_stage_top.v`** — integrates the forwarding muxes, ALU, branch unit,
-  and EX/MEM register, and exposes `redirect`/`redirect_target` — the
-  signals that travel all the way back to the IF stage to steer the PC mux.
+  CSR file, trap controller, and EX/MEM register, and exposes
+  `redirect`/`redirect_target` — the signals that travel all the way back
+  to the IF stage to steer the PC mux.
 
 ## 6. Hazards and forwarding
 
@@ -334,6 +446,19 @@ only exists after the WB-stage mux has selected it; forwarding a raw
 MEM/WB register field would forward the wrong value for exactly that
 instruction class.
 
+`fwd_exmem_data` (in `srotas_processor.v`) needs the same kind of care one
+stage earlier: it defaults to `mem_alu_result`, but must special-case both
+`RESULT_LINK` (using `mem_pc_plus4`) and `RESULT_CSR` (using
+`mem_csr_rdata`, the CSR value threaded out of `ex_stage_top.v`) — for
+either producer, the ALU's own result for that instruction is meaningless
+garbage, since neither a link value nor a CSR read ever goes through the
+ALU. Getting the CSR case wrong here is exactly the kind of bug that's
+easy to introduce silently: `tb_isa_directed.v`'s CSR section (K) includes
+a CSR result forwarded via EX/MEM to the very next instruction
+specifically to catch it, and reverting the fix reproduces the failure
+immediately (the consumer receives stale ALU garbage instead of the
+correct CSR value).
+
 ### The one case forwarding can't fix: load-use hazard
 
 ```
@@ -371,7 +496,25 @@ One cycle later, the load has reached MEM and its result is available as
 `fwd_exmem_data` — ordinary EX/MEM forwarding now picks it up, no further
 stalling needed.
 
-### Branch/jump misprediction
+**A load-use stall must never block a redirect.** `pc_write_en` is
+`!load_use_hazard || ex_redirect`, not simply `!load_use_hazard` —
+`ex_redirect` has to win. Before traps existed this extra term would have
+been dead code: `load_use_hazard` requires `id_ex_mem_read`, and only a
+`mem_read == 0` instruction (a branch or jump) could ever assert
+`ex_redirect`, so the two conditions were mutually exclusive by
+construction. A misaligned load breaks that: the very instruction sitting
+in EX can now be both a load (satisfying the hazard condition against
+whatever's in ID) and the source of a trap redirect, in the same cycle.
+Without the `|| ex_redirect` term, that redirect's target would never
+actually reach the PC register — `pc_next` would compute the right value,
+but `pc_write_en = 0` would silently discard it, leaving the PC stuck one
+cycle behind while `if_id_flush` had already squashed the instructions
+that should have been overwritten by the correct fetch. (`if_id_write_en`
+needs no equivalent fix: `if_id_register.v`'s own flush already takes
+priority over its write-enable whenever both are asserted, so its exact
+value during a flush cycle is a don't-care.)
+
+### Branch/jump/trap/mret redirect
 
 Srotas has no branch prediction: it always fetches sequentially and only
 finds out a branch was taken once it resolves in EX. By that point, two
@@ -382,6 +525,14 @@ and ID). The hazard unit flushes both the same cycle the redirect fires
 costs a fixed 2-cycle penalty on every taken branch/jump — acceptable for a
 single-issue in-order core, and the natural next optimization (see
 `README.md`'s "Known limitations") if this were extended further.
+
+Since `ex_redirect` is wired straight to `ex_stage_top.v`'s `redirect`
+output (Section 5), and that output is now `trap_taken || mret ||
+branch_redirect`, none of `hazard_detection.v`'s squash logic needed to
+change to also cover traps and `mret` — it already treats "the EX-stage
+instruction is redirecting" as one undifferentiated signal, which is
+exactly the "reuse, don't rebuild, the squash path" principle this design
+was built around from the start.
 
 ## 7. MEM — Memory Access
 
@@ -410,24 +561,28 @@ everything else through untouched.
     Stores just write the low N bytes, little-endian, matching RV32I.
 
 - **`mem_wb_register.v`** — pipeline register into WB. Nothing unusual:
-  carries whichever of ALU result / memory data / PC+4 might be needed,
-  plus `rd`/`reg_write`/`result_src` so WB knows what to do with them.
+  carries whichever of ALU result / memory data / PC+4 / old CSR value
+  might be needed, plus `rd`/`reg_write`/`result_src` so WB knows what to
+  do with them.
 
 - **`mem_stage_top.v`** — wires `data_memory` and `mem_wb_register`
   together; the memory address is always `ex_alu_result`, since address
-  calculation already happened in EX regardless of instruction type.
+  calculation already happened in EX regardless of instruction type. The
+  old CSR value passes straight through this module untouched — data
+  memory has no interaction with it at all.
 
 ## 8. WB — Writeback
 
 **Job:** pick the final value to write to the register file.
 
-`wb_stage.v` is a single 3-way mux, keyed on `result_src`:
+`wb_stage.v` is a single 4-way mux, keyed on `result_src`:
 
 | `result_src` | Value written | Used by |
 |---|---|---|
 | `RESULT_ALU` | ALU result | Everything not listed below |
 | `RESULT_MEM` | Loaded memory data | Loads |
 | `RESULT_LINK` | `PC + 4` | `JAL`, `JALR` (the return address) |
+| `RESULT_CSR` | Old CSR value (read in EX) | `csrrw`/`csrrs`/`csrrc` and immediate forms |
 
 This is deliberately the *last* possible point to make this decision — WB
 is where "the value this instruction produces" is finally, unambiguously
@@ -447,7 +602,9 @@ The top-level module (`src/top_level/srotas_processor.v`) does three jobs:
    assignments that live here rather than inside any single stage, because
    they read state from two different stages at once:
    ```verilog
-   assign fwd_exmem_data = (mem_result_src == `RESULT_LINK) ? mem_pc_plus4 : mem_alu_result;
+   assign fwd_exmem_data = (mem_result_src == `RESULT_LINK) ? mem_pc_plus4 :
+                            (mem_result_src == `RESULT_CSR)  ? mem_csr_rdata :
+                                                                mem_alu_result;
    assign fwd_memwb_data = final_wb_rd_data;
    ```
 2. **Instantiates `hazard_detection_unit`** and connects its outputs
@@ -462,16 +619,43 @@ The top-level module (`src/top_level/srotas_processor.v`) does three jobs:
    output wire        wb_commit_valid,  // a real register write just retired
    output wire [4:0]  wb_commit_rd,
    output wire [31:0] wb_commit_data,
-   output wire [31:0] if_pc_debug
+   output wire [31:0] wb_commit_pc,     // PC of the retiring instruction
+   output wire [31:0] if_pc_debug,
+   output wire        trap_valid,       // a trap just resolved
+   output wire [31:0] trap_pc,
+   output wire [31:0] trap_cause,
+   output wire [31:0] trap_mtval
    ```
    `wb_commit_valid` is gated by `rd != 0` — a write targeting `x0` is
    architecturally a no-op (e.g. `jal x0, ...`, a common idiom for "jump
    without saving a return address"), even though the control path still
-   raises `reg_write` for it. Both testbenches (Section 10) watch only this
-   port, never internal signals, to decide pass or fail — it's the one
-   place in the design that reports "an instruction just permanently
-   changed architectural state," which is the only thing a black-box test
-   should need to observe.
+   raises `reg_write` for it. `wb_commit_pc` needed no new pipeline field:
+   `memwb_pc_plus4` is already threaded to WB for JAL/JALR link values, so
+   the retiring instruction's own PC is just `memwb_pc_plus4 - 4`.
+
+   `trap_*` mirrors `wb_commit_*` for trap events, which never produce a
+   commit (a trapping instruction's `reg_write` is always suppressed —
+   Section 5). Its signals are sourced from `ex_stage_top.v`'s internal
+   trap logic but **deliberately delayed two clock cycles** by a small
+   shift register before being exposed here — the trap itself still
+   resolves and redirects in EX exactly as before; only these external
+   *debug* copies are delayed, purely for external observation. Without
+   that delay, `trap_valid` (tapped in EX) and `wb_commit_valid` (tapped
+   in WB, two stages later) would report events from two different
+   pipeline depths, and a later instruction's trap could appear in an
+   external trace *before* an earlier instruction's commit simply because
+   EX is two cycles ahead of WB — not a real reordering, just an artifact
+   of comparing two debug taps at different depths. This is exactly what
+   happened on the first real run of the lockstep harness (Section 10):
+   an `ADDI` immediately followed by a load that trapped on misalignment
+   had its trap reported before the `ADDI`'s own commit, purely from this
+   timing skew, with the redirect/squash itself completely unaffected.
+
+   Both testbenches and the lockstep harness (Section 10) watch only
+   these ports, never internal signals, to decide pass or fail — they're
+   the only place in the design that reports "an instruction just
+   permanently changed architectural state, or excepted," which is the
+   only thing a black-box observer should need.
 
 ## 10. How it's verified
 
@@ -479,7 +663,7 @@ Both testbenches in `src/testbenches/` are built around that same
 `wb_commit_*` port, on the principle that a testbench should observe the
 processor's architectural effects, not its internal wiring.
 
-- **`tb_isa_directed.v`** — the real regression (94 checks). It builds a
+- **`tb_isa_directed.v`** — the real regression (134 checks). It builds a
   program from `emit(instr)` calls (using the encoder functions in
   `rv32i_encoder.vh`) interleaved with `chk(rd, expected_data)` calls, in
   true program order, forming an expected-commit queue. Because this
@@ -489,9 +673,39 @@ processor's architectural effects, not its internal wiring.
   commit, an extra commit (e.g. a squashed instruction leaking through
   after all), or a wrong value are all caught the same way, by comparing
   against the next queue entry. See `README.md`'s "Testing" section for
-  the full coverage table (sections A–J) and for the three concrete
+  the full coverage table (sections A–M) and for the three concrete
   cycle-by-cycle hazard traces (back-to-back forwarding, a load-use stall,
-  and a taken-branch squash) with actual waveform timing.
+  and a taken-branch squash) with actual waveform timing. Two sections are
+  worth calling out for what they prove *isn't* covered elsewhere, because
+  both caught real bugs during development rather than hypothetical ones:
+  - **Section K** (CSR) includes a CSR result forwarded via EX/MEM to the
+    very next instruction, exercising the `RESULT_CSR` arm of
+    `fwd_exmem_data` in `srotas_processor.v` (Section 9) - reverting that
+    fix and rerunning reproduces the exact failure it was added to catch.
+  - **Section L** (traps) ends its misaligned-store trigger with an
+    `LW` from a *pre-primed* address, checking that the trap controller's
+    `mem_write` suppression (Section 5) actually held - a store has no
+    register result, so a suppression bug there is invisible to anything
+    that only checks `rd` values. The address is primed with a known,
+    all-nonzero-byte sentinel first rather than assumed to read as zero:
+    genuinely untouched memory reads as `X` in Vivado's `xsim`, not 0, so
+    comparing against an assumed-zero value would not have caught the bug
+    it was written to catch.
+
+- **`csr_file.v`**, and `control_unit.v`'s and `id_ex_register.v`'s CSR
+  *and* trap-classification decode paths, also each have their own
+  standalone unit testbenches (`tb_csr_file.v`, `tb_control_unit_csr.v`,
+  `tb_id_ex_register_csr.v`, 168 checks combined) — exercising the module
+  in isolation with a minimal harness before it was wired into the full
+  pipeline, the same incremental discipline the rest of this codebase
+  follows. The trap controller's *resolution* logic (misalignment
+  detection, cause/value selection, redirect priority, effect
+  suppression) has no standalone unit test: it's integrated deeply
+  enough into `ex_stage_top.v` (alongside the ALU, branch unit, and CSR
+  file) that isolating it would mean re-stubbing most of that module: the
+  full-pipeline Section L coverage above is the intended verification for
+  it, the same way CSR *execution* (as opposed to CSR *decode*) has no
+  standalone test either.
 
 - **`tb_program.v`** — a template for running an arbitrary compiled
   program from `mem/program.mem`, checking final architectural state
@@ -500,11 +714,46 @@ processor's architectural effects, not its internal wiring.
   "Running your own program" section for the `$readmemh` working-directory
   caveat that applies to both Icarus and Vivado.
 
+- **`tools/golden_model.py` + `tools/lockstep_compare.py`** — a second,
+  independent verification method for exactly the reason `tb_isa_directed.v`'s
+  own header describes: a hand-authored `chk()` queue predicts what
+  should happen, which stops scaling once trap timing and CSR
+  interleaving make that prediction hard to do by hand. `golden_model.py`
+  is a from-scratch instruction-level RV32I + Zicsr + M-mode-trap
+  simulator that mirrors this design's specific CSR-masking and
+  trap-detection choices (not the general RISC-V spec); `lockstep_compare.py`
+  diffs its trace against a real simulation's, event by event.
+  `tb_isa_directed.v` dumps both `mem/lockstep_test.mem` (the exact
+  program it built) and `dut_trace.log` (every commit and trap it
+  observed) as a side effect of running, so the harness's first target is
+  the same 134-check program already hand-verified above - three
+  independent methods (hand-written `chk()`, the golden model, and the
+  RTL) agreeing on all 139 events is the strongest confidence this
+  design currently has. It isn't a live cycle-by-cycle co-simulation
+  against something like Spike - no RISC-V toolchain or ISS is available
+  in this repo's environment - but a trace diff achieves the same
+  practical goal: no more hand-computing expected values for anything
+  trap-shaped. See `srotas_processor.v`'s `trap_valid`/`trap_pc`/
+  `trap_cause`/`trap_mtval` debug ports (Section 9) for a real bug this
+  harness surfaced in its very first run - not in the design, but in how
+  those ports were observed.
+
 ## 11. Scope and what's deliberately not here
 
-RV32I only — no compressed (C), multiply/divide (M), CSRs, exceptions, or
-interrupts. No branch prediction (every taken branch/jump costs a fixed
-2-cycle bubble, per Section 6). No caches, single outstanding memory access
-per cycle. These aren't oversights; they're the stated v1 scope for a
-single hobby-scale in-order core (see `README.md`'s "Known limitations" and
-"Contributing" sections for what's intended to come next).
+RV32I plus Zicsr (CSR instructions execute, per Section 5), Zifencei
+(`fence`/`fence.i`, both true no-ops per Section 4), and M-mode exception
+handling (`ecall`/`ebreak`/`mret`, illegal instructions, misaligned
+instruction/load/store addresses, per Section 5's trap controller) — but
+no compressed (C) or multiply/divide (M) extensions, and no interrupts or
+S/U privilege modes: `mstatus`'s `MPP` field is hardwired to M-mode, and
+`mie`/`mip` exist in `csr_file.v` but nothing drives or consumes them,
+since there's no timer or external interrupt source yet (a
+CLINT/PLIC-equivalent, a later roadmap phase). This closes out
+`docs/roadmap.md`'s Phase 1. No branch
+prediction (every taken branch/jump costs a fixed 2-cycle bubble, per
+Section 6). No caches, single outstanding memory access per cycle. These
+aren't oversights; they're the stated current scope for a single
+hobby-scale in-order core, being built out incrementally — see
+[`docs/roadmap.md`](roadmap.md) for the phased plan toward a
+Linux-capable core, and `README.md`'s "Known limitations" and
+"Contributing" sections for a shorter summary.

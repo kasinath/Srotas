@@ -20,6 +20,7 @@ module mem_stage_top #(
     input  wire [31:0] ex_mem_write_data,
     input  wire [4:0]  ex_rd_addr,
     input  wire [2:0]  ex_funct3,
+    input  wire [31:0] ex_csr_rdata,
     input  wire        ex_reg_write,
     input  wire        ex_mem_read,
     input  wire        ex_mem_write,
@@ -29,6 +30,7 @@ module mem_stage_top #(
     output wire [31:0] wb_alu_result,
     output wire [31:0] wb_mem_read_data,
     output wire [4:0]  wb_rd_addr,
+    output wire [31:0] wb_csr_rdata,
     output wire        wb_reg_write,
     output wire [1:0]  wb_result_src
 );
@@ -57,6 +59,7 @@ module mem_stage_top #(
         .alu_result     (ex_alu_result),
         .mem_read_data  (mem_read_data),
         .rd_addr        (ex_rd_addr),
+        .csr_rdata      (ex_csr_rdata),
         .reg_write      (ex_reg_write),
         .result_src     (ex_result_src),
 
@@ -64,6 +67,7 @@ module mem_stage_top #(
         .alu_result_out    (wb_alu_result),
         .mem_read_data_out (wb_mem_read_data),
         .rd_addr_out       (wb_rd_addr),
+        .csr_rdata_out     (wb_csr_rdata),
         .reg_write_out     (wb_reg_write),
         .result_src_out    (wb_result_src)
     );

@@ -45,6 +45,7 @@ module id_stage_top (
     output wire [31:0] ex_rs2_data,
     output wire [31:0] ex_imm,
     output wire [2:0]  ex_funct3,
+    output wire [11:0] ex_csr_addr,
 
     output wire        ex_reg_write,
     output wire [1:0]  ex_alu_src_a,
@@ -55,7 +56,13 @@ module id_stage_top (
     output wire [1:0]  ex_result_src,
     output wire        ex_branch,
     output wire        ex_jump,
-    output wire        ex_is_jalr
+    output wire        ex_is_jalr,
+    output wire [1:0]  ex_csr_op,
+    output wire        ex_csr_use_imm,
+    output wire        ex_ecall,
+    output wire        ex_ebreak,
+    output wire        ex_mret,
+    output wire        ex_illegal
 );
 
     wire [6:0] opcode  = instruction[6:0];
@@ -64,6 +71,11 @@ module id_stage_top (
     wire [4:0] rd_addr  = instruction[11:7];
     wire [2:0] funct3   = instruction[14:12];
     wire [6:0] funct7   = instruction[31:25];
+    // Same bit range as the I-type immediate, but a CSR address is an
+    // unsigned 12-bit index, not a value to sign-extend - so it's taken
+    // directly from the instruction rather than routed through
+    // sign_extend.v's IMM_I path.
+    wire [11:0] csr_addr = instruction[31:20];
 
     assign rs1_addr_id = rs1_addr;
     assign rs2_addr_id = rs2_addr;
@@ -82,6 +94,12 @@ module id_stage_top (
     wire        jump;
     wire        is_jalr;
     wire [2:0]  imm_format;
+    wire [1:0]  csr_op;
+    wire        csr_use_imm;
+    wire        ecall;
+    wire        ebreak;
+    wire        mret;
+    wire        illegal;
 
     register_file u_register_file (
         .clk          (clk),
@@ -99,6 +117,7 @@ module id_stage_top (
         .opcode     (opcode),
         .funct3     (funct3),
         .funct7     (funct7),
+        .csr_addr   (csr_addr),
         .reg_write  (reg_write),
         .alu_src_a  (alu_src_a),
         .alu_src_b  (alu_src_b),
@@ -109,7 +128,13 @@ module id_stage_top (
         .branch     (branch),
         .jump       (jump),
         .is_jalr    (is_jalr),
-        .imm_format (imm_format)
+        .imm_format (imm_format),
+        .csr_op      (csr_op),
+        .csr_use_imm (csr_use_imm),
+        .ecall       (ecall),
+        .ebreak      (ebreak),
+        .mret        (mret),
+        .illegal     (illegal)
     );
 
     sign_extend u_sign_extend (
@@ -132,6 +157,7 @@ module id_stage_top (
         .rs2_data  (rs2_data),
         .imm       (extended_imm),
         .funct3    (funct3),
+        .csr_addr  (csr_addr),
 
         .reg_write  (reg_write),
         .alu_src_a  (alu_src_a),
@@ -143,6 +169,12 @@ module id_stage_top (
         .branch     (branch),
         .jump       (jump),
         .is_jalr    (is_jalr),
+        .csr_op      (csr_op),
+        .csr_use_imm (csr_use_imm),
+        .ecall       (ecall),
+        .ebreak      (ebreak),
+        .mret        (mret),
+        .illegal     (illegal),
 
         .pc_out         (ex_pc),
         .pc_plus4_out   (ex_pc_plus4),
@@ -153,6 +185,7 @@ module id_stage_top (
         .rs2_data_out   (ex_rs2_data),
         .imm_out        (ex_imm),
         .funct3_out     (ex_funct3),
+        .csr_addr_out   (ex_csr_addr),
 
         .reg_write_out  (ex_reg_write),
         .alu_src_a_out  (ex_alu_src_a),
@@ -163,7 +196,13 @@ module id_stage_top (
         .result_src_out (ex_result_src),
         .branch_out     (ex_branch),
         .jump_out       (ex_jump),
-        .is_jalr_out    (ex_is_jalr)
+        .is_jalr_out    (ex_is_jalr),
+        .csr_op_out      (ex_csr_op),
+        .csr_use_imm_out (ex_csr_use_imm),
+        .ecall_out       (ex_ecall),
+        .ebreak_out      (ex_ebreak),
+        .mret_out        (ex_mret),
+        .illegal_out     (ex_illegal)
     );
 
 endmodule

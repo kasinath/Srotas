@@ -17,3 +17,7 @@ xsim.dir/
 webtalk*.log
 dfx_runtime.txt
 *.wdb
+
+# Python (tools/golden_model.py, tools/lockstep_compare.py)
+__pycache__/
+*.pyc

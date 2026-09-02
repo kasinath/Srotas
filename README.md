@@ -17,11 +17,12 @@ cycle like water moving downstream.
 
 | | |
 |---|---|
-| ISA | RV32I (all 47 base instructions) |
+| ISA | RV32I (all 47 base instructions) + Zicsr (all 6 CSR instructions) + Zifencei |
 | Pipeline | 5-stage, in-order, single issue |
 | Hazard handling | Full EX/MEM + MEM/WB forwarding, register-file bypass, 1-cycle load-use stall |
 | Control hazards | Branch/jump resolved in EX, 2-instruction squash, same-cycle redirect |
-| Directed regression | **94 / 94 checks passing** |
+| Traps | M-mode `ecall`/`ebreak`/`mret`, illegal-instruction, and misaligned instruction/load/store, all via the same redirect/squash path as branches |
+| Directed regression | **134 / 134 checks passing** |
 | Verified in | Icarus Verilog **and** Xilinx Vivado 2025.2 (`xvlog`/`xelab`/`xsim`) |
 | Synthesis | Clean elaboration, no latches, no `$readmemh` full-array resets (BRAM-friendly) |
 
@@ -38,6 +39,9 @@ Runs any program built from the RV32I base instruction set:
 | Stores | `sb sh sw` |
 | Branches | `beq bne blt bge bltu bgeu` |
 | Jumps | `jal jalr` (subroutine call/return, correct link value) |
+| CSR (Zicsr) | `csrrw csrrs csrrc csrrwi csrrsi csrrci` against `mstatus mie mtvec mscratch mepc mcause mtval` etc. |
+| System / traps | `ecall ebreak mret` (M-mode); `wfi` decodes as a NOP; illegal instructions and misaligned instruction/load/store addresses trap |
+| Memory ordering (Zifencei) | `fence fence.i` (both true no-ops — single in-order hart, no caches) |
 
 Every one of these is individually exercised by the test suite below —
 not just decoded, but checked against the exact value it should produce.
@@ -238,9 +242,11 @@ ever failed.
 
 ## Testing
 
-Two testbenches, built around a `wb_commit_valid/rd/data` debug port that
-reports every real architectural register write as it retires — this is
-what both testbenches watch instead of peeking at internal state.
+Two testbenches plus a Python lockstep harness, all built around a
+`wb_commit_valid/rd/data` (and, for traps, `trap_valid/pc/cause/mtval`)
+debug port that reports every real architectural register write and trap
+as it happens — an external observer instead of peeking at internal
+state.
 
 ### `tb_isa_directed.v` — the regression
 
@@ -265,7 +271,7 @@ correct. A missing commit, an extra commit (e.g. a squashed instruction
 leaking through), or a wrong value are all caught the same way: compared
 against the next item in the queue.
 
-**Coverage (94 checks):**
+**Coverage (134 checks):**
 
 | Section | What it proves |
 |---|---|
@@ -279,6 +285,9 @@ against the next item in the queue.
 | H. JAL / JALR | Subroutine call, correct link value, correct return |
 | I. Forwarding-priority stress | Self-referential accumulator — closer (EX/MEM) source must beat farther (MEM/WB) source |
 | J. Backward branch (real loop) | 10-iteration loop, sum 1..10, the only *backward* redirect test |
+| K. All 6 CSR (Zicsr) instructions | `csrrw/csrrs/csrrc/csrrwi/csrrsi/csrrci` against `mscratch`; a GPR value forwarded into a CSR write, and a CSR-produced value forwarded via EX/MEM to the next instruction |
+| L. Traps | `ecall`/`ebreak`/illegal-instruction/misaligned-load/misaligned-store, one handler reused for all five, each verifying correct `mepc`/`mcause`/`mtval` capture and a clean `mret` return; also proves a misaligned store's write is actually suppressed, not just its (nonexistent) register result |
+| M. FENCE / FENCE.I | Both are true no-ops here; proves neither traps nor disturbs a forwarded dependency across the fence |
 
 ### `tb_program.v` — the "run your own program" template
 
@@ -299,17 +308,50 @@ comprehensive enough to exercise a loop, ALU ops, and load/store together.
 This is the file to copy and point at your own `.mem` (see
 [Running your own program](#running-your-own-program)).
 
+### The lockstep harness — an independent, automatic cross-check
+
+`tb_isa_directed.v`'s hand-written `chk()` queue is authored by a human
+predicting what each instruction should do — reliable, but it doesn't
+scale to programs where trap timing and CSR side effects make the
+expected sequence hard to compute by hand (see `docs/roadmap.md`, Phase
+1). As a second, independent check that needs no hand-authored
+expectations, the same testbench also dumps the exact program it built
+(`mem/lockstep_test.mem`) and a plain-text trace of every commit and trap
+it observes (`dut_trace.log`) as a side effect of running.
+`tools/golden_model.py` is a from-scratch RV32I + Zicsr + M-mode-trap
+instruction-level simulator that executes the same `.mem` file and
+produces the same trace format; `tools/lockstep_compare.py` diffs the two
+event-by-event and reports the first divergence, the same way the
+scoreboard does:
+
+```bash
+# after running tb_isa_directed.v once (any simulator - it writes both files)
+python3 tools/lockstep_compare.py mem/lockstep_test.mem dut_trace.log
+```
+
+This isn't a live cycle-by-cycle DPI co-simulation against something like
+Spike (no RISC-V toolchain or ISS is assumed to be available) — it's a
+trace diff, comparable to how many RTL verification flows actually use a
+golden model's commit log in practice. One real subtlety it surfaces:
+`dut_trace.log`'s trap events are deliberately delayed two cycles inside
+`srotas_processor.v` before being reported, to align with when
+`wb_commit_*` reports a normal instruction (WB) rather than when the trap
+actually resolves (EX, two stages earlier) — without that alignment, a
+later instruction's trap could appear in the trace *before* an earlier
+instruction's commit, purely from being observed two cycles sooner, not
+from any real reordering.
+
 ### Results
 
 ```
 $ vvp tb_isa_directed.out            (Icarus Verilog)
 ========================================
-RESULT: ALL 94 CHECKS PASSED
+RESULT: ALL 134 CHECKS PASSED
 ========================================
 
 $ xsim tb_isa_directed_snap ...      (Vivado 2025.2 xsim)
 ========================================
-RESULT: ALL 94 CHECKS PASSED
+RESULT: ALL 134 CHECKS PASSED
 ========================================
 
 $ vvp tb_program.out / xsim tb_program_snap ...
@@ -329,17 +371,19 @@ identical results in both tools.
 ```
 src/
   common/        rv32i_defines.vh   - shared opcode/ALU-op/immediate encodings
+  csr/            csr_file.v - the CSR register file
   if_stage/       PC, instruction memory, IF/ID register
   id_stage/       register file, control unit, sign extend, ID/EX register
-  ex_stage/       ALU, branch/jump unit, EX/MEM register
+  ex_stage/       ALU, branch/jump unit, CSR execution, trap controller, EX/MEM register
   mem_stage/      data memory, MEM/WB register
   wb_stage/       writeback mux
   top_level/      srotas_processor.v (top module), hazard_detection.v
-  testbenches/    rv32i_encoder.vh, tb_isa_directed.v, tb_program.v
-mem/             program.mem - sample compiled program (see below)
+  testbenches/    rv32i_encoder.vh, tb_isa_directed.v, tb_program.v, unit tests
+mem/             program.mem, lockstep_test.mem - sample compiled programs (see below)
 tools/           gen_sample_program.v - the script that produced program.mem
+                 golden_model.py, lockstep_compare.py - the lockstep verification harness
 vivado/          create_project.tcl - one-shot Vivado project generator
-docs/            Notes from the original build
+docs/            processor_guide.md (module-by-module reference), roadmap.md
 ```
 
 ## Running the tests yourself
@@ -347,7 +391,7 @@ docs/            Notes from the original build
 ### Icarus Verilog
 
 ```bash
-# Full directed regression (94 self-checking assertions)
+# Full directed regression (134 self-checking assertions)
 iverilog -I src/common -I src/testbenches -o sim.out -s tb_isa_directed \
   src/if_stage/*.v src/id_stage/*.v src/ex_stage/*.v src/mem_stage/*.v \
   src/wb_stage/*.v src/top_level/hazard_detection.v src/top_level/srotas_processor.v \
@@ -363,7 +407,7 @@ iverilog -I src/common -I src/testbenches -o sim2.out -s tb_program \
 cp sim2.out mem/ && cd mem && vvp sim2.out && cd ..
 ```
 
-Both should end with `RESULT: ALL 94 CHECKS PASSED` / `RESULT: PASS`.
+Both should end with `RESULT: ALL 134 CHECKS PASSED` / `RESULT: PASS`.
 
 ### Vivado
 
@@ -382,7 +426,7 @@ initialization file (Vivado auto-exports it into the simulation run
 directory), and sets `tb_program` as the simulation top. Then, in the Flow
 Navigator: **Run Simulation → Run Behavioral Simulation**.
 
-To run the full 94-check regression instead:
+To run the full 134-check regression instead:
 ```tcl
 set_property top tb_isa_directed [get_filesets sim_1]
 launch_simulation
@@ -441,26 +485,39 @@ To produce a `.mem` file:
   `src/testbenches/rv32i_encoder.vh` the way `tools/gen_sample_program.v`
   does, and `$writememh` the result.
 
-The processor only implements the base RV32I integer ISA — no compressed
-(C), multiply/divide (M), CSRs, exceptions, or interrupts — so a compiled
-program must target `-march=rv32i` and avoid anything that needs an OS or
-those extensions.
+The processor implements the base RV32I integer ISA plus Zicsr (CSR
+read/modify/write instructions), Zifencei (`fence`/`fence.i`, both
+no-ops here), and M-mode exception handling (`ecall`/`ebreak`/`mret`,
+illegal instructions, misaligned addresses) — no compressed (C) or
+multiply/divide (M) extensions, and no interrupts or privilege modes
+(S/U) beyond the single M-mode this core always runs in — so a compiled
+program must target `-march=rv32i_zicsr_zifencei` and avoid anything that
+needs an OS, interrupts, or those other extensions.
 
 ## Known limitations (current scope, for a single hobby-scale in-order core)
 
 - No branch prediction — every taken branch/jump costs a 2-cycle bubble.
-- No exceptions, interrupts, or CSRs.
+- M-mode synchronous exceptions only: `ecall`/`ebreak`/`mret`, illegal
+  instructions, and misaligned instruction/load/store addresses all trap
+  correctly, but there's no S/U privilege mode and no interrupt source
+  (timer/external) yet — `mie`/`mip` exist in the CSR file but nothing
+  drives or consumes them.
 - No M-extension (multiply/divide) or C-extension (compressed instructions).
 - Single outstanding memory access per cycle, no caches.
 
-None of these are permanent limits, just what v1 covers — see below.
+None of these are permanent limits, just what v1 covers — see
+[`docs/roadmap.md`](docs/roadmap.md) for the planned path to a
+Linux-capable core across future releases.
 
 ## Contributing
 
 This started as a learning project and is very much still growing.
-Branch prediction, the M/C extensions, exceptions and CSRs, caches, and an
-FPGA bring-up on real hardware are all natural next steps, and they're
-deliberately left as future releases rather than tackled all at once.
+Exceptions and CSRs, the M/A extensions, a minimal SoC (UART/CLINT/PLIC),
+privilege modes, an MMU, and eventually booting Linux are all planned as
+incremental releases — see [`docs/roadmap.md`](docs/roadmap.md) for the
+full sequencing and reasoning. Branch prediction and other microarchitecture
+performance work are deliberately *not* planned for this core; see the
+roadmap's "Guiding decisions" for why.
 
 Contributions, issues, and ideas are welcome from anyone — whether that's
 fixing a bug, adding a feature from the list above, extending the test

@@ -23,6 +23,8 @@
 `define OP_STORE  7'b0100011
 `define OP_IMM    7'b0010011
 `define OP_REG    7'b0110011
+`define OP_SYSTEM 7'b1110011  // CSR instructions (Zicsr) and ECALL/EBREAK/MRET
+`define OP_MISC_MEM 7'b0001111  // FENCE (base RV32I) and FENCE.I (Zifencei)
 
 // ---------------------------------------------------------------------------
 // ALU control encoding (4 bits) - shared by control_unit.v and alu.v
@@ -60,6 +62,7 @@
 `define RESULT_ALU  2'b00  // ALU result
 `define RESULT_MEM  2'b01  // data memory read result
 `define RESULT_LINK 2'b10  // PC + 4 (JAL / JALR return address)
+`define RESULT_CSR  2'b11  // old CSR value (csrrw/csrrs/csrrc and immediate forms)
 
 // ---------------------------------------------------------------------------
 // Load/store size encoding (funct3)
@@ -79,5 +82,61 @@
 `define FUNCT3_BGEU 3'b111
 
 `define NOP_INSTR 32'h00000013  // addi x0, x0, 0
+
+// ---------------------------------------------------------------------------
+// Machine-mode CSR addresses (Zicsr) - the minimal M-mode-only set needed
+// for trap handling. Used by csr_file.v.
+// ---------------------------------------------------------------------------
+`define CSR_MSTATUS   12'h300
+`define CSR_MISA      12'h301
+`define CSR_MIE       12'h304
+`define CSR_MTVEC     12'h305
+`define CSR_MSCRATCH  12'h340
+`define CSR_MEPC      12'h341
+`define CSR_MCAUSE    12'h342
+`define CSR_MTVAL     12'h343
+`define CSR_MIP       12'h344
+`define CSR_MVENDORID 12'hF11
+`define CSR_MARCHID   12'hF12
+`define CSR_MIMPID    12'hF13
+`define CSR_MHARTID   12'hF14
+
+// ---------------------------------------------------------------------------
+// CSR instruction operation encoding (used by control_unit.v's csr_op
+// output). For all six csrrw/csrrs/csrrc/csrrwi/csrrsi/csrrci encodings,
+// funct3[1:0] directly gives this 2-bit operation regardless of whether the
+// source is a register (csrr_) or a 5-bit immediate (csrr_i) - funct3[2] is
+// the separate register-vs-immediate selector, exposed as csr_use_imm.
+// ---------------------------------------------------------------------------
+`define CSR_OP_RW 2'b01  // csrrw(i):  CSR <= operand
+`define CSR_OP_RS 2'b10  // csrrs(i):  CSR <= CSR | operand
+`define CSR_OP_RC 2'b11  // csrrc(i):  CSR <= CSR & ~operand
+
+// ---------------------------------------------------------------------------
+// OP_SYSTEM, funct3 == 000: identifies ECALL/EBREAK/MRET by the imm[11:0]
+// field (instruction[31:20] - the same bits as a CSR address, since these
+// share an opcode/funct3 with the CSR instructions but not the encoding
+// space itself: funct3 == 000 never means "CSR instruction"). WFI shares
+// this space too; it's treated as a NOP (a legal implementation choice
+// per the RISC-V spec) since there's no interrupt to wait for yet.
+// Anything else here (SFENCE.VMA, or garbage) is undecoded and falls
+// through to control_unit.v's illegal-instruction default.
+// ---------------------------------------------------------------------------
+`define SYS_IMM_ECALL  12'h000
+`define SYS_IMM_EBREAK 12'h001
+`define SYS_IMM_MRET   12'h302
+`define SYS_IMM_WFI    12'h105
+
+// ---------------------------------------------------------------------------
+// Machine-mode exception cause codes (mcause, bit31=0 - these are all
+// synchronous exceptions, never interrupts, since no interrupt source
+// exists yet).
+// ---------------------------------------------------------------------------
+`define CAUSE_INSTR_MISALIGNED 32'd0
+`define CAUSE_ILLEGAL_INSTR    32'd2
+`define CAUSE_BREAKPOINT       32'd3
+`define CAUSE_LOAD_MISALIGNED  32'd4
+`define CAUSE_STORE_MISALIGNED 32'd6
+`define CAUSE_ECALL_M          32'd11
 
 `endif // RV32I_DEFINES_VH
