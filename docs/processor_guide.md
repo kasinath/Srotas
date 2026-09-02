@@ -45,7 +45,7 @@ single-purpose modules (a register, a decoder, an ALU) plus one
 the rest of the pipeline. This mirrors the datapath itself: a stage's
 internal wiring is that stage's private concern, and only its stage boundary
 signals matter to its neighbors. It also means each piece can be tested and
-reasoned about independently — the ALU doesn't know it's part of a
+reasoned about independently — the ALU doesn't know that it's part of a
 pipeline; it just computes a function of two operands.
 
 ### Why a shared `rv32i_defines.vh`?
