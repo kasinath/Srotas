@@ -462,7 +462,7 @@ None of these are permanent limits, just what v1 covers — see below.
 
 ## Contributing
 
-This started as a 5-day learning project and is very much still growing.
+This started as a learning project and is very much still growing.
 Branch prediction, the M/C extensions, exceptions and CSRs, caches, and an
 FPGA bring-up on real hardware are all natural next steps, and they're
 deliberately left as future releases rather than tackled all at once.
