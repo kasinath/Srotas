@@ -167,11 +167,6 @@ flowchart LR
 ```
 
 
-An editable version of this diagram is at `docs/architecture.pptx` — every
-box, mux, and wire is a native PowerPoint shape (not an embedded picture),
-so colors, positions, and labels can be changed directly in PowerPoint. It
-was generated from `tools/gen_architecture_pptx.py`; regenerate it after
-editing that script rather than hand-maintaining both files.
 
 - **PC MUX** selects `PC+4` vs. `branch_target` on `branch_redirect` — the
   redirect condition (`jump`, or `branch && branch_taken`) is computed in
@@ -344,7 +339,7 @@ src/
 mem/             program.mem - sample compiled program (see below)
 tools/           gen_sample_program.v - the script that produced program.mem
 vivado/          create_project.tcl - one-shot Vivado project generator
-docs/            day-by-day design notes from the original build
+docs/            Notes from the original build
 ```
 
 ## Running the tests yourself
