@@ -21,7 +21,10 @@
 // widths (signed and unsigned), a store-data forwarding case, a load-use
 // stall, a 3-instruction-apart register-file bypass case, all six branch
 // comparisons (taken, with squash-of-two verification, plus one
-// not-taken case), and a JAL/JALR subroutine call-and-return.
+// not-taken case), a JAL/JALR subroutine call-and-return, all six Zicsr
+// CSR instructions (including a CSR-produced value forwarded via EX/MEM
+// to the very next instruction), all five M-mode trap causes with a
+// clean MRET return, and FENCE/FENCE.I (Zifencei).
 // ============================================================================
 
 `timescale 1ns/1ps
@@ -46,7 +49,12 @@ module tb_isa_directed;
     wire        wb_commit_valid;
     wire [4:0]  wb_commit_rd;
     wire [31:0] wb_commit_data;
+    wire [31:0] wb_commit_pc;
     wire [31:0] if_pc_debug;
+    wire        trap_valid;
+    wire [31:0] trap_pc;
+    wire [31:0] trap_cause;
+    wire [31:0] trap_mtval;
 
     srotas_processor #(
         .IMEM_WORDS     (512),
@@ -59,7 +67,12 @@ module tb_isa_directed;
         .wb_commit_valid (wb_commit_valid),
         .wb_commit_rd    (wb_commit_rd),
         .wb_commit_data  (wb_commit_data),
-        .if_pc_debug     (if_pc_debug)
+        .wb_commit_pc    (wb_commit_pc),
+        .if_pc_debug     (if_pc_debug),
+        .trap_valid      (trap_valid),
+        .trap_pc         (trap_pc),
+        .trap_cause      (trap_cause),
+        .trap_mtval      (trap_mtval)
     );
 
     // -----------------------------------------------------------------
@@ -305,6 +318,134 @@ module tb_isa_directed;
         emit(I_LW  (9, 2, 32'd0));            chk(9, 32'd55);     // read it back
 
         // ============================================================
+        // Section K: CSR instructions (Zicsr), against mscratch (a plain
+        // read/write CSR with no masking, so results are simple to hand-
+        // verify). Covers all six encodings, a back-to-back same-address
+        // CSR access (proving no special forwarding is needed between two
+        // CSR instructions - csr_file.v's write commits one cycle before a
+        // following instruction reads it, exactly the natural EX-stage
+        // spacing), a GPR value forwarded INTO a CSR write operand, and -
+        // the case that would silently break without the EX/MEM forward
+        // mux's RESULT_CSR arm in srotas_processor.v - a CSR-produced
+        // value forwarded OUT to the very next instruction.
+        // ============================================================
+        emit(I_CSRRWI(25, 5'd5,  `CSR_MSCRATCH));  chk(25, 32'd0);   // old=0, mscratch<=5
+        emit(I_CSRRS (26, 0,     `CSR_MSCRATCH));  chk(26, 32'd5);   // pure read (rs1=x0): old=5, unchanged
+        emit(I_ADDI  (27, 0, 32'h55));              chk(27, 32'h55);
+        emit(I_CSRRW (28, 27,    `CSR_MSCRATCH));  chk(28, 32'd5);   // rs1 forwarded from prior ADDI; old=5, mscratch<=0x55
+        emit(I_ADD   (29, 28, 0));                  chk(29, 32'd5);   // x28 (a CSR result) forwarded EX/MEM -> EX
+        emit(I_CSRRC (30, 27,    `CSR_MSCRATCH));  chk(30, 32'h55);  // old=0x55, mscratch <= 0x55 & ~0x55 = 0
+        emit(I_CSRRSI(31, 5'd31, `CSR_MSCRATCH));  chk(31, 32'd0);   // old=0, mscratch <= 0x1F
+        emit(I_CSRRCI(24, 5'd31, `CSR_MSCRATCH));  chk(24, 32'd31);  // old=0x1F, mscratch <= 0
+
+        // ============================================================
+        // Section L: traps. One handler (placed inline, skipped over
+        // during normal flow by an unconditional JAL) is reused for five
+        // separate exception triggers - ECALL, EBREAK, an illegal
+        // instruction, a misaligned load, and a misaligned store - each
+        // proving the trap controller captures the right mepc/mcause/
+        // mtval, and each returning via MRET to mepc+4 (the standard
+        // "skip past the faulting instruction" epilogue) to prove the
+        // pipeline resumes cleanly afterward. The final LW checks that
+        // the misaligned store's write was actually suppressed, not just
+        // that its GPR write was (stores have no register result to
+        // catch a suppression bug the way a load's would).
+        // ============================================================
+        begin : trap_section
+            // RV32I register fields are 5 bits (x0-x31 only); every
+            // register used below is chosen to avoid colliding with any
+            // register still live at this point - x2 is the sole
+            // exception, and Section L never writes it, only reads it
+            // (Section J left it at 0) in the final corruption check.
+            integer skip_slot, handler_idx;
+            integer ecall_idx, ebreak_idx, illegal_idx, lh_idx, sw_idx;
+            integer ecall_pc, ebreak_pc, illegal_pc, lh_pc, sw_pc;
+            integer handler_byte_addr;
+
+            skip_slot = idx; emit(32'h0);           // JAL x0, SKIP_HANDLER (patched below)
+
+            handler_idx = idx;
+            emit(I_CSRRS (1, 0, `CSR_MEPC));        // read mepc
+            emit(I_CSRRS (3, 0, `CSR_MCAUSE));      // read mcause
+            emit(I_CSRRS (4, 0, `CSR_MTVAL));       // read mtval
+            emit(I_ADDI  (1, 1, 32'd4));             // mepc + 4 (skip past the faulting instruction)
+            emit(I_CSRRW (0, 1, `CSR_MEPC));        // mepc <= mepc + 4
+            emit(`I_MRET);
+
+            prog[skip_slot] = I_JAL(0, (idx - skip_slot) * 4);  // SKIP_HANDLER starts here
+            handler_byte_addr = handler_idx * 4;
+
+            emit(I_ADDI (6, 0, handler_byte_addr));   // handler address (fits in 12 bits: small program)
+            emit(I_CSRRW(7, 6, `CSR_MTVEC));         // set mtvec; capture old value (0)
+
+            // Prime mem[4] with a known, all-bytes-nonzero sentinel so the
+            // later misaligned-store check (below) compares against a
+            // real prior value instead of assuming untouched memory reads
+            // as zero - it doesn't in every simulator (Vivado's xsim
+            // leaves genuinely virgin memory as X, not 0).
+            emit(I_LUI (9, 32'hCAFEF000));
+            emit(I_ADDI(9, 9, 32'd13));                // x9 = 0xCAFEF00D
+            emit(I_SW  (9, 2, 32'd4));                 // mem[4] <- 0xCAFEF00D
+
+            ecall_idx = idx;   emit(`I_ECALL);
+            ebreak_idx = idx;  emit(`I_EBREAK);
+            illegal_idx = idx; emit(32'hFFFFFFFF);   // opcode=1111111: unrecognized by any OP_* case
+
+            emit(I_ADDI(14, 0, 32'd1));               // odd address: word- and half-misaligned
+            lh_idx = idx; emit(I_LH(15, 14, 32'd0));
+
+            emit(I_ADDI(16, 0, 32'd2));               // half-aligned but word-misaligned address
+            // Every byte of this value is nonzero, so if the misaligned
+            // store's suppression ever failed, the corrupted bytes at
+            // address 4 (checked below) would be visibly nonzero too -
+            // a value like 0x00001234 would hide that exact bug, since
+            // its upper two bytes are already zero.
+            emit(I_LUI (17, 32'hDEADC000));
+            emit(I_ADDI(17, 17, -32'sd273));           // x17 = 0xDEADBEEF (0xDEADC000 + (-0x111))
+            sw_idx = idx; emit(I_SW(17, 16, 32'd0));
+
+            emit(I_ADDI(19, 0, 32'd777));             // proves execution resumed correctly
+            emit(I_LW  (20, 2, 32'd4));                // x2==0 (Section J); mem[4] must still hold the sentinel
+
+            ecall_pc   = ecall_idx * 4;
+            ebreak_pc  = ebreak_idx * 4;
+            illegal_pc = illegal_idx * 4;
+            lh_pc      = lh_idx * 4;
+            sw_pc      = sw_idx * 4;
+
+            chk(6, handler_byte_addr);
+            chk(7, 32'd0);                           // mtvec was 0 before this write
+            chk(9, 32'hCAFEF000);
+            chk(9, 32'hCAFEF00D);
+
+            chk(1, ecall_pc);        chk(3, `CAUSE_ECALL_M);          chk(4, 32'd0); chk(1, ecall_pc + 4);
+            chk(1, ebreak_pc);       chk(3, `CAUSE_BREAKPOINT);       chk(4, 32'd0); chk(1, ebreak_pc + 4);
+            chk(1, illegal_pc);      chk(3, `CAUSE_ILLEGAL_INSTR);    chk(4, 32'd0); chk(1, illegal_pc + 4);
+
+            chk(14, 32'd1);
+            chk(1, lh_pc);           chk(3, `CAUSE_LOAD_MISALIGNED);  chk(4, 32'd1); chk(1, lh_pc + 4);
+
+            chk(16, 32'd2);
+            chk(17, 32'hDEADC000);
+            chk(17, 32'hDEADBEEF);
+            chk(1, sw_pc);           chk(3, `CAUSE_STORE_MISALIGNED); chk(4, 32'd2); chk(1, sw_pc + 4);
+
+            chk(19, 32'd777);
+            chk(20, 32'hCAFEF00D);                   // the misaligned store never actually wrote memory
+        end
+
+        // ============================================================
+        // Section M: FENCE / FENCE.I (Zifencei). Both are true no-ops in
+        // this design (single in-order hart, no caches) - this just
+        // proves they neither trap nor disturb the instructions around
+        // them, including a forwarded dependency across the fence.
+        // ============================================================
+        emit(I_ADDI(21, 0, 32'd42));           chk(21, 32'd42);
+        emit(`I_FENCE);
+        emit(`I_FENCE_I);
+        emit(I_ADDI(22, 21, 32'd1));            chk(22, 32'd43);
+
+        // ============================================================
         // Halt: spin on self forever so nothing further ever commits
         // ============================================================
         emit(I_JAL(0, 32'd0));
@@ -314,6 +455,19 @@ module tb_isa_directed;
             integer i;
             for (i = 0; i < idx; i = i + 1)
                 dut.u_if_stage.u_instruction_memory.mem[i] = prog[i];
+        end
+
+        // Also dump this program as a .mem file: tools/golden_model.py
+        // runs the exact same instruction sequence and its trace is
+        // diffed against dut_trace.log (below) by tools/lockstep_compare.py
+        // - the widest single cross-check in the repo, since this program
+        // already carries the hand-written chk() queue above.
+        begin : dump_mem
+            integer fd, i;
+            fd = $fopen("mem/lockstep_test.mem", "w");
+            for (i = 0; i < idx; i = i + 1)
+                $fdisplay(fd, "%08h", prog[i]);
+            $fclose(fd);
         end
     end
 
@@ -352,6 +506,27 @@ module tb_isa_directed;
     end
 
     // -----------------------------------------------------------------
+    // Lockstep trace dump: an independent record of the same event
+    // stream the scoreboard above checks, in the plain text format
+    // tools/golden_model.py and tools/lockstep_compare.py expect -
+    // "C <pc> <rd> <data>" per register write, "T <pc> <cause> <mtval>"
+    // per trap. See tools/lockstep_compare.py's module header for the
+    // full format and how to run the comparison.
+    // -----------------------------------------------------------------
+    integer trace_fd;
+
+    initial begin
+        trace_fd = $fopen("dut_trace.log", "w");
+    end
+
+    always @(posedge clk) begin
+        if (rst_n && wb_commit_valid)
+            $fdisplay(trace_fd, "C %08h %0d %08h", wb_commit_pc, wb_commit_rd, wb_commit_data);
+        if (rst_n && trap_valid)
+            $fdisplay(trace_fd, "T %08h %0d %08h", trap_pc, trap_cause, trap_mtval);
+    end
+
+    // -----------------------------------------------------------------
     // Reset and run
     // -----------------------------------------------------------------
     initial begin
@@ -373,6 +548,7 @@ module tb_isa_directed;
             $display("RESULT: %0d ERROR(S) - SEE LOG ABOVE", errors);
         end
         $display("========================================");
+        $fclose(trace_fd);
         $finish;
     end
 

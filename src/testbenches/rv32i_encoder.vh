@@ -114,6 +114,25 @@ function [31:0] I_BGEU; input [4:0] rs1, rs2; input [31:0] imm; I_BGEU = b_type(
 function [31:0] I_JAL;  input [4:0] rd; input [31:0] imm;              I_JAL  = j_type(imm, rd, `OP_JAL);           endfunction
 function [31:0] I_JALR; input [4:0] rd, rs1; input [31:0] imm;         I_JALR = i_type(imm, rs1, 3'b000, rd, `OP_JALR); endfunction
 
-`define I_NOP 32'h00000013
+// --- CSR instructions (Zicsr) -----------------------------------------------
+// The CSR address sits in the same bit range as the I-type immediate, so
+// i_type() encodes these directly; for the _I (immediate) forms, the value
+// passed as "rs1" is really the 5-bit zero-extended immediate (zimm) -
+// encoding-wise it's the identical field, just not a register reference.
+function [31:0] I_CSRRW;  input [4:0] rd, rs1;  input [31:0] csr; I_CSRRW  = i_type(csr, rs1,  3'b001, rd, `OP_SYSTEM); endfunction
+function [31:0] I_CSRRS;  input [4:0] rd, rs1;  input [31:0] csr; I_CSRRS  = i_type(csr, rs1,  3'b010, rd, `OP_SYSTEM); endfunction
+function [31:0] I_CSRRC;  input [4:0] rd, rs1;  input [31:0] csr; I_CSRRC  = i_type(csr, rs1,  3'b011, rd, `OP_SYSTEM); endfunction
+function [31:0] I_CSRRWI; input [4:0] rd, zimm; input [31:0] csr; I_CSRRWI = i_type(csr, zimm, 3'b101, rd, `OP_SYSTEM); endfunction
+function [31:0] I_CSRRSI; input [4:0] rd, zimm; input [31:0] csr; I_CSRRSI = i_type(csr, zimm, 3'b110, rd, `OP_SYSTEM); endfunction
+function [31:0] I_CSRRCI; input [4:0] rd, zimm; input [31:0] csr; I_CSRRCI = i_type(csr, zimm, 3'b111, rd, `OP_SYSTEM); endfunction
+
+`define I_NOP    32'h00000013
+// Fixed encodings (funct3/rs1/rd are all zero, so these never need
+// parameters) - values are the well-known standard RISC-V encodings.
+`define I_ECALL   32'h00000073
+`define I_EBREAK  32'h00100073
+`define I_MRET    32'h30200073
+`define I_FENCE   32'h0000000F
+`define I_FENCE_I 32'h0000100F
 
 `endif // RV32I_ENCODER_VH

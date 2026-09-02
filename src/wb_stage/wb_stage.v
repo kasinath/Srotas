@@ -3,10 +3,11 @@
 // File: wb_stage.v
 // Stage: WB (Writeback)
 //
-// Final stage: selects between ALU result, memory read data, and the
-// PC+4 link value (for JAL/JALR), and presents that plus the destination
-// register to the register file (fed back into the ID stage at the top
-// level) and to the forwarding unit.
+// Final stage: selects between ALU result, memory read data, the PC+4 link
+// value (for JAL/JALR), and the old CSR value read in EX (for a CSR
+// instruction), and presents that plus the destination register to the
+// register file (fed back into the ID stage at the top level) and to the
+// forwarding unit.
 // ============================================================================
 
 `timescale 1ns/1ps
@@ -17,6 +18,7 @@ module wb_stage (
     input  wire [31:0] alu_result,
     input  wire [31:0] mem_read_data,
     input  wire [4:0]  rd_addr,
+    input  wire [31:0] csr_rdata,
     input  wire        reg_write,
     input  wire [1:0]  result_src,
 
@@ -30,6 +32,7 @@ module wb_stage (
         case (result_src)
             `RESULT_MEM:  selected_data = mem_read_data;
             `RESULT_LINK: selected_data = pc_plus4;
+            `RESULT_CSR:  selected_data = csr_rdata;
             default:      selected_data = alu_result; // RESULT_ALU
         endcase
     end

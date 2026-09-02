@@ -22,6 +22,7 @@ module ex_mem_register (
     input  wire [31:0] mem_write_data,
     input  wire [4:0]  rd_addr,
     input  wire [2:0]  funct3,
+    input  wire [31:0] csr_rdata,
 
     input  wire        reg_write,
     input  wire        mem_read,
@@ -33,6 +34,7 @@ module ex_mem_register (
     output reg  [31:0] mem_write_data_out,
     output reg  [4:0]  rd_addr_out,
     output reg  [2:0]  funct3_out,
+    output reg  [31:0] csr_rdata_out,
 
     output reg          reg_write_out,
     output reg          mem_read_out,
@@ -47,6 +49,7 @@ module ex_mem_register (
             mem_write_data_out <= 32'b0;
             rd_addr_out        <= 5'b0;
             funct3_out         <= 3'b0;
+            csr_rdata_out      <= 32'b0;
             reg_write_out      <= 1'b0;
             mem_read_out       <= 1'b0;
             mem_write_out      <= 1'b0;
@@ -57,6 +60,7 @@ module ex_mem_register (
             mem_write_data_out <= mem_write_data;
             rd_addr_out        <= rd_addr;
             funct3_out         <= funct3;
+            csr_rdata_out      <= csr_rdata;
             reg_write_out      <= reg_write;
             mem_read_out       <= mem_read;
             mem_write_out      <= mem_write;

@@ -6,15 +6,33 @@
 // Decodes opcode/funct3/funct7 into the control signals that drive the rest
 // of the datapath. All encodings come from rv32i_defines.vh so this unit
 // and the ALU can never disagree about what an alu_op value means.
+//
+// CSR instructions (csrrw/csrrs/csrrc and their _i immediate forms, all
+// under OP_SYSTEM) decode into csr_op/csr_use_imm, executed in EX
+// (ex_stage_top.v).
+//
+// OP_SYSTEM with funct3 == 3'b000 is ECALL/EBREAK/MRET, distinguished by
+// the imm[11:0] field (instruction[31:20] - the csr_addr input, reused
+// here for its raw bit pattern rather than as a CSR address). WFI is
+// treated as a NOP (legal per spec). Anything else in this space, and any
+// entirely unrecognized opcode, sets `illegal` - RV32I doesn't implement
+// compressed or M-extension opcodes, or several other CSR addresses, and
+// encountering one should trap rather than silently misbehave.
+//
+// ecall/ebreak/mret/illegal are decoded here but resolved in EX, the same
+// way branches are: control_unit.v only classifies the instruction, and
+// ex_stage_top.v is where a resulting PC redirect and pipeline squash
+// actually happen (see docs/roadmap.md, Phase 1).
 // ============================================================================
 
 `timescale 1ns/1ps
 `include "rv32i_defines.vh"
 
 module control_unit (
-    input  wire [6:0] opcode,
-    input  wire [2:0] funct3,
-    input  wire [6:0] funct7,
+    input  wire [6:0]  opcode,
+    input  wire [2:0]  funct3,
+    input  wire [6:0]  funct7,
+    input  wire [11:0] csr_addr,  // instruction[31:20]; only used to identify ECALL/EBREAK/MRET/WFI
 
     output reg        reg_write,
     output reg  [1:0] alu_src_a,   // ASEL_RS1 / ASEL_PC / ASEL_ZERO
@@ -22,26 +40,39 @@ module control_unit (
     output reg  [3:0] alu_op,
     output reg        mem_read,
     output reg        mem_write,
-    output reg  [1:0] result_src,  // RESULT_ALU / RESULT_MEM / RESULT_LINK
+    output reg  [1:0] result_src,  // RESULT_ALU / RESULT_MEM / RESULT_LINK / RESULT_CSR
     output reg        branch,
     output reg        jump,
     output reg        is_jalr,     // distinguishes JALR target calc from JAL
-    output reg  [2:0] imm_format
+    output reg  [2:0] imm_format,
+    output reg  [1:0] csr_op,      // CSR_OP_RW / CSR_OP_RS / CSR_OP_RC (don't-care unless result_src == RESULT_CSR)
+    output reg        csr_use_imm, // 1 = operand is the zero-extended rs1-field immediate (csrr__i), 0 = the rs1 register value
+
+    output reg        ecall,
+    output reg        ebreak,
+    output reg        mret,
+    output reg        illegal
 );
 
     always @(*) begin
         // Safe defaults: no side effects.
-        reg_write  = 1'b0;
-        alu_src_a  = `ASEL_RS1;
-        alu_src_b  = 1'b0;
-        alu_op     = `ALU_ADD;
-        mem_read   = 1'b0;
-        mem_write  = 1'b0;
-        result_src = `RESULT_ALU;
-        branch     = 1'b0;
-        jump       = 1'b0;
-        is_jalr    = 1'b0;
-        imm_format = `IMM_I;
+        reg_write   = 1'b0;
+        alu_src_a   = `ASEL_RS1;
+        alu_src_b   = 1'b0;
+        alu_op      = `ALU_ADD;
+        mem_read    = 1'b0;
+        mem_write   = 1'b0;
+        result_src  = `RESULT_ALU;
+        branch      = 1'b0;
+        jump        = 1'b0;
+        is_jalr     = 1'b0;
+        imm_format  = `IMM_I;
+        csr_op      = 2'b00;
+        csr_use_imm = 1'b0;
+        ecall       = 1'b0;
+        ebreak      = 1'b0;
+        mret        = 1'b0;
+        illegal     = 1'b0;
 
         case (opcode)
             `OP_LUI: begin
@@ -148,8 +179,36 @@ module control_unit (
                 endcase
             end
 
+            `OP_SYSTEM: begin
+                if (funct3 != 3'b000) begin
+                    reg_write   = 1'b1;
+                    result_src  = `RESULT_CSR;
+                    csr_op      = funct3[1:0]; // 01=RW, 10=RS, 11=RC for both register and immediate forms
+                    csr_use_imm = funct3[2];   // 1 for csrrwi/csrrsi/csrrci, 0 for csrrw/csrrs/csrrc
+                end else begin
+                    case (csr_addr)
+                        `SYS_IMM_ECALL:  ecall  = 1'b1;
+                        `SYS_IMM_EBREAK: ebreak = 1'b1;
+                        `SYS_IMM_MRET:   mret   = 1'b1;
+                        `SYS_IMM_WFI:    ;       // legal NOP: nothing to wait for yet
+                        default:         illegal = 1'b1; // SFENCE.VMA or garbage - not yet supported
+                    endcase
+                end
+            end
+
+            `OP_MISC_MEM: begin
+                // FENCE (funct3=000, base RV32I) and FENCE.I (funct3=001,
+                // Zifencei) are both true no-ops here: a single in-order
+                // hart with no caches has no memory reordering to fence
+                // and no instruction cache to invalidate. Every signal
+                // stays at its safe default - not illegal, since both are
+                // legitimate, fully-supported instructions.
+            end
+
             default: begin
-                // Unknown opcode: behave as a NOP (no writes, no side effects)
+                // Unrecognized opcode: no compressed/M-extension support,
+                // and this covers any other malformed encoding too.
+                illegal = 1'b1;
             end
         endcase
     end
