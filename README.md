@@ -26,6 +26,15 @@ cycle like water moving downstream.
 | Verified in | Icarus Verilog **and** Xilinx Vivado 2025.2 (`xvlog`/`xelab`/`xsim`) |
 | Synthesis | Clean elaboration, no latches, no `$readmemh` full-array resets (BRAM-friendly) |
 
+## Releases
+
+| Version | Milestone | Download |
+|---|---|---|
+| [v1.1](https://github.com/kasinath/Srotas/releases/tag/v1.1) | Phase 1: Zicsr, Zifencei, M-mode traps, lockstep verification harness (134/134 checks) | [zip](https://github.com/kasinath/Srotas/archive/refs/tags/v1.1.zip) |
+| [v1.0](https://github.com/kasinath/Srotas/releases/tag/v1.0) | Verified RV32I base ISA, 5-stage in-order pipeline, forwarding, hazard stalling (94/94 checks) | [zip](https://github.com/kasinath/Srotas/archive/refs/tags/v1.0.zip) |
+
+See the full [Releases page](https://github.com/kasinath/Srotas/releases) for release notes on every version, and [`docs/roadmap.md`](docs/roadmap.md) for what's planned next.
+
 ## What it can do
 
 Runs any program built from the RV32I base instruction set:
