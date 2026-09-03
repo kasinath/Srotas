@@ -85,6 +85,22 @@ function [31:0] I_DIVU;   input [4:0] rd, rs1, rs2; I_DIVU   = r_type(`FUNCT7_MU
 function [31:0] I_REM;    input [4:0] rd, rs1, rs2; I_REM    = r_type(`FUNCT7_MULDIV, rs2, rs1, `FUNCT3_REM,    rd, `OP_REG); endfunction
 function [31:0] I_REMU;   input [4:0] rd, rs1, rs2; I_REMU   = r_type(`FUNCT7_MULDIV, rs2, rs1, `FUNCT3_REMU,   rd, `OP_REG); endfunction
 
+// --- A extension (Phase 2): funct7 = {funct5, aq, rl}, its own OP_AMO
+// opcode. aq/rl hardwired to 0 - architecturally inert on this single
+// in-order hart with no caches (same reasoning as FENCE/FENCE.I). lr.w's
+// rs2 field is reserved-as-0 per spec; its wrapper takes no rs2 argument.
+function [31:0] I_LR_W;      input [4:0] rd, rs1;      I_LR_W      = r_type({`AMO_F5_LR,   2'b00}, 5'd0, rs1, 3'b010, rd, `OP_AMO); endfunction
+function [31:0] I_SC_W;      input [4:0] rd, rs1, rs2; I_SC_W      = r_type({`AMO_F5_SC,   2'b00}, rs2,  rs1, 3'b010, rd, `OP_AMO); endfunction
+function [31:0] I_AMOSWAP_W; input [4:0] rd, rs1, rs2; I_AMOSWAP_W = r_type({`AMO_F5_SWAP, 2'b00}, rs2,  rs1, 3'b010, rd, `OP_AMO); endfunction
+function [31:0] I_AMOADD_W;  input [4:0] rd, rs1, rs2; I_AMOADD_W  = r_type({`AMO_F5_ADD,  2'b00}, rs2,  rs1, 3'b010, rd, `OP_AMO); endfunction
+function [31:0] I_AMOXOR_W;  input [4:0] rd, rs1, rs2; I_AMOXOR_W  = r_type({`AMO_F5_XOR,  2'b00}, rs2,  rs1, 3'b010, rd, `OP_AMO); endfunction
+function [31:0] I_AMOAND_W;  input [4:0] rd, rs1, rs2; I_AMOAND_W  = r_type({`AMO_F5_AND,  2'b00}, rs2,  rs1, 3'b010, rd, `OP_AMO); endfunction
+function [31:0] I_AMOOR_W;   input [4:0] rd, rs1, rs2; I_AMOOR_W   = r_type({`AMO_F5_OR,   2'b00}, rs2,  rs1, 3'b010, rd, `OP_AMO); endfunction
+function [31:0] I_AMOMIN_W;  input [4:0] rd, rs1, rs2; I_AMOMIN_W  = r_type({`AMO_F5_MIN,  2'b00}, rs2,  rs1, 3'b010, rd, `OP_AMO); endfunction
+function [31:0] I_AMOMAX_W;  input [4:0] rd, rs1, rs2; I_AMOMAX_W  = r_type({`AMO_F5_MAX,  2'b00}, rs2,  rs1, 3'b010, rd, `OP_AMO); endfunction
+function [31:0] I_AMOMINU_W; input [4:0] rd, rs1, rs2; I_AMOMINU_W = r_type({`AMO_F5_MINU, 2'b00}, rs2,  rs1, 3'b010, rd, `OP_AMO); endfunction
+function [31:0] I_AMOMAXU_W; input [4:0] rd, rs1, rs2; I_AMOMAXU_W = r_type({`AMO_F5_MAXU, 2'b00}, rs2,  rs1, 3'b010, rd, `OP_AMO); endfunction
+
 // --- I-type ALU mnemonics ----------------------------------------------
 function [31:0] I_ADDI;  input [4:0] rd, rs1; input [31:0] imm; I_ADDI  = i_type(imm, rs1, 3'b000, rd, `OP_IMM); endfunction
 function [31:0] I_SLTI;  input [4:0] rd, rs1; input [31:0] imm; I_SLTI  = i_type(imm, rs1, 3'b010, rd, `OP_IMM); endfunction

@@ -240,8 +240,8 @@ block Phase 2.
 
 ## Phase 2 — Integer extensions
 
-**Progress: M (multiply/divide) is done, shipping as v1.2.** A (atomics)
-is deferred to v1.3 — splitting the two keeps each a reviewable,
+**Progress: both M (multiply/divide, v1.2) and A (atomics, v1.3) are
+done.** Splitting the two into separate releases kept each a reviewable,
 independently-verified increment, the same discipline Phase 1 used.
 
 - ✅ **M (multiply/divide)**: `src/ex_stage/muldiv_unit.v`, a 32-cycle
@@ -276,9 +276,34 @@ independently-verified increment, the same discipline Phase 1 used.
   found (an unhandled encoding falling through to the wrong default), not a
   new kind of mistake.
 
-- **A (atomics)**: `lr.w`/`sc.w` and the AMO instructions. Required
-  because Linux's kernel-space spinlocks use atomics unconditionally,
-  even on a single-hart system.
+- ✅ **A (atomics)**: `src/mem_stage/amo_unit.v` implements `lr.w`/`sc.w`
+  and the nine AMO ops. Unlike M, **this needed zero new stall mechanism
+  and zero new result-routing** — the two hard problems M had to solve
+  simply don't apply here, for reasons specific to where each extension
+  lives:
+  - `data_memory.v`'s read is already combinational and its write already
+    synchronous to the same address, so a same-cycle read-old/write-new
+    is timing-safe with no changes to that module and no new pipeline
+    register needed anywhere - MEM stays a single-cycle stage.
+  - An AMO's `rd` result (the *old* memory value, for `lr.w` and the nine
+    regular ops) is exactly what `RESULT_MEM` already means, so it rides
+    the existing path with no new `result_src` encoding. Only `sc.w`'s
+    result (a 0/1 success flag) needs a value override, done entirely
+    inside `mem_stage_top.v`.
+  - Asserting `mem_read=1` for the whole AMO family (including `sc.w`,
+    since its result isn't ready until MEM either) makes the *existing*
+    load-use hazard protect a consumer for free — no new hazard-detection
+    logic, unlike M's brand-new `ex_busy`-driven hold.
+
+  `amo_unit.v` owns a small reservation register (one address, one valid
+  bit) using the textbook address-matching model: `lr.w` arms it, `sc.w`
+  always clears it, and any *other* write to the reserved address (a plain
+  store, or a different AMO) also clears it. Getting this right required
+  gating the reservation-set/clear branches on the already trap-suppressed
+  `mem_read`/`mem_write` signals arriving at MEM, not the raw `is_amo` flag
+  — `is_amo` alone isn't trap-aware, so a misaligned `lr.w` would otherwise
+  silently arm a reservation nothing should have set. See
+  `docs/processor_guide.md`, Section 7, for the full design.
 
 ## Phase 3 — Minimal SoC
 
@@ -334,8 +359,8 @@ This phase is the release that earns the "Linux-capable" description.
 | v1.0 | Verified RV32I, 5-stage in-order, forwarding, hazard stalling |
 | v1.1 | ✅ Phase 1 (done): Zicsr, Zifencei, M-mode traps, lockstep verification harness |
 | v1.2 | ✅ Phase 2, part 1 (done): M extension (multiply/divide) |
-| v1.3 | Phase 2, part 2 (current target): A extension (atomics) |
-| v1.4 | Phase 3: memory map, UART, CLINT |
+| v1.3 | ✅ Phase 2, part 2 (done): A extension (atomics) |
+| v1.4 | Phase 3 (current target): memory map, UART, CLINT |
 | v1.5 | Phase 4: PLIC, M/S/U privilege modes |
 | v1.6 | Phase 5: Sv32 MMU + TLB |
 | v2.0 | Phase 6: boots Linux |

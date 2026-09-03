@@ -74,7 +74,7 @@ module csr_file (
     reg [31:0] mcause_reg;
     reg [31:0] mtval_reg;
 
-    localparam [31:0] MISA_VAL = 32'h4000_1100; // RV32 (MXL=1), extensions 'I' + 'M' (Phase 2)
+    localparam [31:0] MISA_VAL = 32'h4000_1101; // RV32 (MXL=1), extensions 'I' + 'M' + 'A' (Phase 2)
 
     // mstatus: only MIE(3)/MPIE(7) are stored; MPP(12:11) is hardwired to
     // M-mode (2'b11); every other field reads zero until privilege modes,

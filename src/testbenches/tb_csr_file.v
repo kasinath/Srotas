@@ -115,7 +115,7 @@ module tb_csr_file;
         csr_read(`CSR_MSTATUS);   check32(rdata, 32'h0000_1800); // MPP=11, rest 0
         csr_read(`CSR_MTVEC);     check32(rdata, 32'h0000_0000);
         csr_read(`CSR_MEPC);      check32(rdata, 32'h0000_0000);
-        csr_read(`CSR_MISA);      check32(rdata, 32'h4000_1100); // 'I' + 'M' (Phase 2)
+        csr_read(`CSR_MISA);      check32(rdata, 32'h4000_1101); // 'I' + 'M' + 'A' (Phase 2)
         csr_read(`CSR_MVENDORID); check32(rdata, 32'h0000_0000);
         csr_read(`CSR_MHARTID);   check32(rdata, 32'h0000_0000);
         csr_read(`CSR_MIP);       check32(rdata, 32'h0000_0000); // no interrupt source wired yet
@@ -145,7 +145,7 @@ module tb_csr_file;
         // ---------------- Read-only registers ignore software writes ----------------
         csr_write(`CSR_MISA, 32'hFFFF_FFFF);
         csr_read(`CSR_MISA);
-        check32(rdata, 32'h4000_1100); // 'I' + 'M' (Phase 2)
+        check32(rdata, 32'h4000_1101); // 'I' + 'M' + 'A' (Phase 2)
 
         csr_write(`CSR_MVENDORID, 32'hFFFF_FFFF);
         csr_read(`CSR_MVENDORID);

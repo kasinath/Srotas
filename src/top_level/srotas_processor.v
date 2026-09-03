@@ -101,6 +101,8 @@ module srotas_processor #(
     wire [11:0] ex_csr_addr;
     wire        ex_ecall, ex_ebreak, ex_mret, ex_illegal;
     wire        ex_is_muldiv;
+    wire        ex_is_amo;
+    wire [4:0]  ex_amo_funct5;
 
     wire        final_wb_reg_write;
     wire [4:0]  final_wb_rd_addr;
@@ -150,7 +152,9 @@ module srotas_processor #(
         .ex_ebreak      (ex_ebreak),
         .ex_mret        (ex_mret),
         .ex_illegal     (ex_illegal),
-        .ex_is_muldiv   (ex_is_muldiv)
+        .ex_is_muldiv   (ex_is_muldiv),
+        .ex_is_amo      (ex_is_amo),
+        .ex_amo_funct5  (ex_amo_funct5)
     );
 
     // -------------------------------------------------------------------
@@ -168,6 +172,8 @@ module srotas_processor #(
     wire        mem_reg_write, mem_mem_read, mem_mem_write;
     wire [1:0]  mem_result_src;
     wire [31:0] mem_csr_rdata;
+    wire        mem_is_amo;
+    wire [4:0]  mem_amo_funct5;
 
     ex_stage_top u_ex_stage (
         .clk       (clk),
@@ -200,6 +206,8 @@ module srotas_processor #(
         .mret        (ex_mret),
         .illegal     (ex_illegal),
         .is_muldiv   (ex_is_muldiv),
+        .is_amo      (ex_is_amo),
+        .amo_funct5  (ex_amo_funct5),
 
         .forward_a      (forward_a),
         .forward_b      (forward_b),
@@ -224,7 +232,9 @@ module srotas_processor #(
         .mem_mem_read    (mem_mem_read),
         .mem_mem_write   (mem_mem_write),
         .mem_result_src  (mem_result_src),
-        .mem_csr_rdata   (mem_csr_rdata)
+        .mem_csr_rdata   (mem_csr_rdata),
+        .mem_is_amo      (mem_is_amo),
+        .mem_amo_funct5  (mem_amo_funct5)
     );
 
     // Best-available forwarded value from the instruction currently one
@@ -305,6 +315,8 @@ module srotas_processor #(
         .ex_mem_read       (mem_mem_read),
         .ex_mem_write      (mem_mem_write),
         .ex_result_src     (mem_result_src),
+        .ex_is_amo         (mem_is_amo),
+        .ex_amo_funct5     (mem_amo_funct5),
 
         .wb_pc_plus4      (memwb_pc_plus4),
         .wb_alu_result    (memwb_alu_result),

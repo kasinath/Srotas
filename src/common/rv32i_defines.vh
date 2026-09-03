@@ -25,6 +25,7 @@
 `define OP_REG    7'b0110011
 `define OP_SYSTEM 7'b1110011  // CSR instructions (Zicsr) and ECALL/EBREAK/MRET
 `define OP_MISC_MEM 7'b0001111  // FENCE (base RV32I) and FENCE.I (Zifencei)
+`define OP_AMO    7'b0101111  // A extension: lr.w/sc.w and the nine AMO ops
 
 // ---------------------------------------------------------------------------
 // ALU control encoding (4 bits) - shared by control_unit.v and alu.v
@@ -39,6 +40,7 @@
 `define ALU_SRA  4'h7
 `define ALU_OR   4'h8
 `define ALU_AND  4'h9
+`define ALU_PASS_A 4'hA  // result = operand_a, operand_b ignored (AMO address = rs1, no immediate)
 
 // ---------------------------------------------------------------------------
 // Immediate format selector (for sign_extend.v)
@@ -96,6 +98,27 @@
 `define FUNCT3_DIVU   3'b101
 `define FUNCT3_REM    3'b110
 `define FUNCT3_REMU   3'b111
+
+// ---------------------------------------------------------------------------
+// A extension (atomics). OP_AMO's funct3 is always 3'b010 (word-only in
+// RV32A - 3'b011 would be doubleword, RV64A-only); funct5 (instruction
+// [31:27], the top 5 bits of what would be funct7) selects the specific
+// op, with aq/rl (the low 2 bits of that same 7-bit field) architecturally
+// inert here - a single in-order hart with no caches has no ordering to
+// enforce and no other bus master to acquire/release against, the same
+// reasoning that makes FENCE/FENCE.I true no-ops.
+// ---------------------------------------------------------------------------
+`define AMO_F5_LR    5'b00010
+`define AMO_F5_SC    5'b00011
+`define AMO_F5_SWAP  5'b00001
+`define AMO_F5_ADD   5'b00000
+`define AMO_F5_XOR   5'b00100
+`define AMO_F5_AND   5'b01100
+`define AMO_F5_OR    5'b01000
+`define AMO_F5_MIN   5'b10000
+`define AMO_F5_MAX   5'b10100
+`define AMO_F5_MINU  5'b11000
+`define AMO_F5_MAXU  5'b11100
 
 `define NOP_INSTR 32'h00000013  // addi x0, x0, 0
 

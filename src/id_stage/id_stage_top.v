@@ -64,7 +64,9 @@ module id_stage_top (
     output wire        ex_ebreak,
     output wire        ex_mret,
     output wire        ex_illegal,
-    output wire        ex_is_muldiv
+    output wire        ex_is_muldiv,
+    output wire        ex_is_amo,
+    output wire [4:0]  ex_amo_funct5
 );
 
     wire [6:0] opcode  = instruction[6:0];
@@ -78,6 +80,10 @@ module id_stage_top (
     // directly from the instruction rather than routed through
     // sign_extend.v's IMM_I path.
     wire [11:0] csr_addr = instruction[31:20];
+    // funct5 (instruction[31:27]) selects the specific AMO operation - the
+    // top 5 bits of the same field funct7 already occupies, reused rather
+    // than re-sliced from the raw instruction a second time.
+    wire [4:0] amo_funct5 = funct7[6:2];
 
     assign rs1_addr_id = rs1_addr;
     assign rs2_addr_id = rs2_addr;
@@ -103,6 +109,7 @@ module id_stage_top (
     wire        mret;
     wire        illegal;
     wire        is_muldiv;
+    wire        is_amo;
 
     register_file u_register_file (
         .clk          (clk),
@@ -138,7 +145,8 @@ module id_stage_top (
         .ebreak      (ebreak),
         .mret        (mret),
         .illegal     (illegal),
-        .is_muldiv   (is_muldiv)
+        .is_muldiv   (is_muldiv),
+        .is_amo      (is_amo)
     );
 
     sign_extend u_sign_extend (
@@ -163,6 +171,7 @@ module id_stage_top (
         .imm       (extended_imm),
         .funct3    (funct3),
         .csr_addr  (csr_addr),
+        .amo_funct5 (amo_funct5),
 
         .reg_write  (reg_write),
         .alu_src_a  (alu_src_a),
@@ -181,6 +190,7 @@ module id_stage_top (
         .mret        (mret),
         .illegal     (illegal),
         .is_muldiv   (is_muldiv),
+        .is_amo      (is_amo),
 
         .pc_out         (ex_pc),
         .pc_plus4_out   (ex_pc_plus4),
@@ -192,6 +202,7 @@ module id_stage_top (
         .imm_out        (ex_imm),
         .funct3_out     (ex_funct3),
         .csr_addr_out   (ex_csr_addr),
+        .amo_funct5_out (ex_amo_funct5),
 
         .reg_write_out  (ex_reg_write),
         .alu_src_a_out  (ex_alu_src_a),
@@ -209,7 +220,8 @@ module id_stage_top (
         .ebreak_out      (ex_ebreak),
         .mret_out        (ex_mret),
         .illegal_out     (ex_illegal),
-        .is_muldiv_out   (ex_is_muldiv)
+        .is_muldiv_out   (ex_is_muldiv),
+        .is_amo_out      (ex_is_amo)
     );
 
 endmodule

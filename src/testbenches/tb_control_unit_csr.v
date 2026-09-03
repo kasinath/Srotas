@@ -18,6 +18,14 @@
 // encoding no longer silently decoding as ADD/SUB/etc. through the base
 // R-type funct3 case (funct7[5], which the base ops key off of, happens to
 // be 0 for FUNCT7_MULDIV too).
+//
+// And the Phase 2 A-extension decode: all 11 OP_AMO/funct5 encodings
+// setting is_amo, mem_write correctly clear only for lr.w (the one variant
+// that never writes), a non-word funct3 and an unrecognized funct5 both
+// setting illegal - OP_AMO is its own opcode, not shared with any base
+// R-type op, so unlike M there's no "silently decodes as something else"
+// regression to guard against here, only "decodes as illegal" for the two
+// malformed cases.
 // ============================================================================
 
 `timescale 1ns/1ps
@@ -48,6 +56,7 @@ module tb_control_unit_csr;
     wire        mret;
     wire        illegal;
     wire        is_muldiv;
+    wire        is_amo;
 
     integer errors;
     integer checks;
@@ -74,7 +83,8 @@ module tb_control_unit_csr;
         .ebreak      (ebreak),
         .mret        (mret),
         .illegal     (illegal),
-        .is_muldiv   (is_muldiv)
+        .is_muldiv   (is_muldiv),
+        .is_amo      (is_amo)
     );
 
     task check1;
@@ -174,6 +184,26 @@ module tb_control_unit_csr;
         end
     endtask
 
+    // Applies one OP_AMO funct5 and checks the full expected bundle,
+    // including mem_write's one variant-dependent bit (0 only for lr.w).
+    task check_amo;
+        input [4:0] f5;
+        input       exp_mem_write;
+        begin
+            opcode = `OP_AMO; funct3 = 3'b010; funct7 = {f5, 2'b00}; // aq=rl=0
+            #1;
+            check1(reg_write, 1'b1);
+            check1(is_amo, 1'b1);
+            check2(result_src, `RESULT_MEM);
+            check1(mem_read, 1'b1);
+            check1(mem_write, exp_mem_write);
+            check1(branch, 1'b0);
+            check1(jump, 1'b0);
+            check1(illegal, 1'b0);
+            check1(is_muldiv, 1'b0);
+        end
+    endtask
+
     initial begin
         errors = 0;
         checks = 0;
@@ -240,6 +270,31 @@ module tb_control_unit_csr;
         check1(branch, 1'b1);
         check1(reg_write, 1'b0);
         check4(alu_op, `ALU_SUB);
+
+        // ---------------- A extension: all 11 OP_AMO/funct5 encodings ----------------
+        check_amo(`AMO_F5_LR,    1'b0);  // the one variant that never writes
+        check_amo(`AMO_F5_SC,    1'b1);
+        check_amo(`AMO_F5_SWAP,  1'b1);
+        check_amo(`AMO_F5_ADD,   1'b1);
+        check_amo(`AMO_F5_XOR,   1'b1);
+        check_amo(`AMO_F5_AND,   1'b1);
+        check_amo(`AMO_F5_OR,    1'b1);
+        check_amo(`AMO_F5_MIN,   1'b1);
+        check_amo(`AMO_F5_MAX,   1'b1);
+        check_amo(`AMO_F5_MINU,  1'b1);
+        check_amo(`AMO_F5_MAXU,  1'b1);
+
+        // ---------------- A extension: malformed encodings trap illegal ----------------
+        opcode = `OP_AMO; funct3 = 3'b011; funct7 = {`AMO_F5_ADD, 2'b00}; // doubleword: RV64A-only
+        #1;
+        check1(illegal, 1'b1);
+        check1(is_amo, 1'b0);
+        check1(reg_write, 1'b0);
+
+        opcode = `OP_AMO; funct3 = 3'b010; funct7 = {5'b11111, 2'b00}; // unrecognized funct5
+        #1;
+        check1(illegal, 1'b1);
+        check1(is_amo, 1'b0);
 
         $display("");
         $display("========================================");

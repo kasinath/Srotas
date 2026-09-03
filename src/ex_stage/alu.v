@@ -32,6 +32,7 @@ module alu (
             `ALU_SRA:  result = $signed(operand_a) >>> operand_b[4:0];
             `ALU_OR:   result = operand_a | operand_b;
             `ALU_AND:  result = operand_a & operand_b;
+            `ALU_PASS_A: result = operand_a; // AMO address = rs1 alone, no immediate to add
             default:   result = 32'b0;
         endcase
     end

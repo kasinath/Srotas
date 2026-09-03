@@ -24,11 +24,15 @@
 // not-taken case), a JAL/JALR subroutine call-and-return, all six Zicsr
 // CSR instructions (including a CSR-produced value forwarded via EX/MEM
 // to the very next instruction), all five M-mode trap causes with a
-// clean MRET return, FENCE/FENCE.I (Zifencei), and the M extension's
+// clean MRET return, FENCE/FENCE.I (Zifencei), the M extension's
 // pipeline interactions - operand forwarding into and out of a held
 // multi-cycle muldiv, back-to-back muldiv instructions, a load-use hazard
 // immediately adjacent to one, and a branch/trap immediately after one
-// ends.
+// ends - and the A extension's pipeline interactions - a back-to-back
+// lr.w/sc.w lock-acquire, sc.w failing after an intervening store
+// invalidates its reservation, an AMO's operand forwarded in and its
+// result consumed via a load-use stall, and misaligned lr.w/AMO traps
+// that leave no reservation armed.
 // ============================================================================
 
 `timescale 1ns/1ps
@@ -526,6 +530,89 @@ module tb_isa_directed;
             n_trap_pc = n_trap_idx * 4;
             chk(1, n_trap_pc); chk(3, `CAUSE_LOAD_MISALIGNED); chk(4, 32'd129); chk(1, n_trap_pc + 4);
             emit(I_ADDI(25, 0, 32'd55)); chk(25, 32'd55);   // resumed cleanly
+        end
+
+        // ============================================================
+        // Section O: A extension (atomics). Phase 2. Per-op correctness
+        // and the reservation model's edge cases are tb_amo_unit.v's job;
+        // this section is the pipeline-interaction cases that only a full
+        // run exercises - the same split the M extension used between
+        // tb_muldiv_unit.v and Section N. Registers are reused freely
+        // across the sub-tests below (O1's x5/x6 etc. are long since
+        // irrelevant by the time O6 reuses them), the same convention
+        // Section L and Section N already established.
+        // ============================================================
+        begin : amo_section
+            integer o_trap_idx2, o_trap_pc2, o_trap_idx3, o_trap_pc3;
+
+            // O1: lr.w immediately followed by sc.w, zero idle cycle -
+            // the actual lock-acquire idiom. The value sc.w will store is
+            // computed BEFORE the lr.w so nothing sits between them.
+            emit(I_ADDI(5, 0, 32'd256)); chk(5, 32'd256);   // address
+            emit(I_ADDI(6, 0, 32'd99));  chk(6, 32'd99);
+            emit(I_SW  (6, 5, 32'd0));                       // prime mem[256]=99 (no chk - store)
+            emit(I_ADDI(7, 0, 32'd42));  chk(7, 32'd42);    // sc.w's value, ready ahead of time
+            emit(I_LR_W(8, 5));          chk(8, 32'd99);    // arms the reservation
+            emit(I_SC_W(9, 5, 7));       chk(9, 32'd0);     // immediately after lr.w - succeeds
+            emit(I_LW  (10, 5, 32'd0));  chk(10, 32'd42);   // confirm the write actually landed
+
+            // O2: sc.w fails after an intervening ordinary store to the
+            // SAME address invalidates the reservation lr.w armed.
+            emit(I_ADDI(11, 0, 32'd260)); chk(11, 32'd260);
+            emit(I_ADDI(12, 0, 32'd11));  chk(12, 32'd11);
+            emit(I_SW  (12, 11, 32'd0));                     // prime mem[260]=11
+            emit(I_LR_W(13, 11));         chk(13, 32'd11);  // arms the reservation
+            emit(I_ADDI(14, 0, 32'd77));  chk(14, 32'd77);
+            emit(I_SW  (14, 11, 32'd0));                     // plain store to the reserved address - invalidates it
+            emit(I_ADDI(15, 0, 32'd999)); chk(15, 32'd999);
+            emit(I_SC_W(16, 11, 15));     chk(16, 32'd1);   // fails
+            emit(I_LW  (17, 11, 32'd0));  chk(17, 32'd77);  // memory still holds the intervening store's value
+
+            // O3: a regular AMO (amoadd.w) whose operand (rs2) comes from
+            // an immediately-preceding producer - needs EX/MEM forwarding
+            // into the AMO, the same shape as Section D's store-data case.
+            emit(I_ADDI(18, 0, 32'd264));  chk(18, 32'd264);
+            emit(I_ADDI(19, 0, 32'd5));    chk(19, 32'd5);
+            emit(I_SW  (19, 18, 32'd0));                     // prime mem[264]=5
+            emit(I_ADDI(20, 0, 32'd3));    chk(20, 32'd3);  // operand producer, right before the AMO
+            emit(I_AMOADD_W(21, 18, 20));  chk(21, 32'd5);  // returns OLD value 5; writes 5+3=8
+            emit(I_LW  (22, 18, 32'd0));   chk(22, 32'd8);  // confirm the write
+
+            // O4: the AMO's old-value result consumed by the very next
+            // instruction - a LOAD-USE STALL (mem_read=1 for every AMO
+            // variant), not EX/MEM forwarding - the key architectural
+            // difference from how the M extension's result reached its
+            // consumer (Section N used EX/MEM forwarding there instead).
+            emit(I_ADDI(23, 0, 32'd268)); chk(23, 32'd268);
+            emit(I_ADDI(24, 0, 32'd10));  chk(24, 32'd10);
+            emit(I_SW  (24, 23, 32'd0));                     // prime mem[268]=10
+            emit(I_ADDI(25, 0, 32'd1));   chk(25, 32'd1);
+            emit(I_AMOADD_W(26, 23, 25)); chk(26, 32'd10);  // returns old value 10
+            emit(I_ADDI(27, 26, 32'd0));  chk(27, 32'd10);  // load-use hazard against x26
+
+            // O5: a misaligned lr.w traps (LOAD_MISALIGNED - lr.w never
+            // sets mem_write), and critically, leaves NO reservation
+            // armed: a subsequent sc.w to an unrelated address still
+            // fails, proving mem_read_in gated the reservation-set branch
+            // in amo_unit.v rather than the raw (trap-unaware) is_amo.
+            emit(I_ADDI(28, 0, 32'd271)); chk(28, 32'd271); // misaligned: 271 mod 4 = 3
+            o_trap_idx2 = idx; emit(I_LR_W(29, 28));
+            o_trap_pc2 = o_trap_idx2 * 4;
+            chk(1, o_trap_pc2); chk(3, `CAUSE_LOAD_MISALIGNED); chk(4, 32'd271); chk(1, o_trap_pc2 + 4);
+
+            emit(I_ADDI(30, 0, 32'd272)); chk(30, 32'd272); // a different, aligned address
+            emit(I_ADDI(31, 0, 32'd999)); chk(31, 32'd999);
+            emit(I_SC_W(29, 30, 31));     chk(29, 32'd1);   // fails - no reservation was ever armed
+
+            // O6: a misaligned regular AMO traps as STORE_MISALIGNED
+            // (mem_write=1 for every AMO variant except lr.w).
+            emit(I_ADDI(5, 0, 32'd273)); chk(5, 32'd273);   // misaligned: 273 mod 4 = 1
+            emit(I_ADDI(6, 0, 32'd5));   chk(6, 32'd5);
+            o_trap_idx3 = idx; emit(I_AMOADD_W(7, 5, 6));
+            o_trap_pc3 = o_trap_idx3 * 4;
+            chk(1, o_trap_pc3); chk(3, `CAUSE_STORE_MISALIGNED); chk(4, 32'd273); chk(1, o_trap_pc3 + 4);
+
+            emit(I_ADDI(8, 0, 32'd111)); chk(8, 32'd111);   // resumed cleanly
         end
 
         // ============================================================

@@ -34,6 +34,20 @@
 // falling into the illegal-instruction default. alu_op is left at its
 // default for a muldiv instruction; it's never consumed, since
 // ex_stage_top.v routes muldiv_unit's result in place of the ALU's.
+//
+// A extension (atomics, Phase 2): OP_AMO is its own opcode (no base-ISA
+// opcode to share/collide with, unlike M). alu_op = ALU_PASS_A gives an
+// address of rs1 alone - AMO's R-type-shaped encoding has no immediate
+// field at all (funct5/aq/rl/rs2 occupy those bit positions instead), so
+// routing through the usual alu_src_b (imm-or-rs2) mux would either read
+// garbage as an immediate or wrongly add rs2 into the address. mem_read is
+// asserted for every one of the 11 variants, including sc.w: none of
+// their results are ready before MEM, so this is what makes the existing
+// load-use hazard protect a consumer for free, exactly as it does for an
+// ordinary load - see hazard_detection.v. mem_write is asserted for every
+// variant except lr.w (which never writes); amo_unit.v (MEM stage) is
+// what turns sc.w's mem_write intent into a real, conditional write based
+// on its reservation.
 // ============================================================================
 
 `timescale 1ns/1ps
@@ -63,7 +77,8 @@ module control_unit (
     output reg        ebreak,
     output reg        mret,
     output reg        illegal,
-    output reg        is_muldiv
+    output reg        is_muldiv,
+    output reg        is_amo
 );
 
     always @(*) begin
@@ -86,6 +101,7 @@ module control_unit (
         mret        = 1'b0;
         illegal     = 1'b0;
         is_muldiv   = 1'b0;
+        is_amo      = 1'b0;
 
         case (opcode)
             `OP_LUI: begin
@@ -209,6 +225,27 @@ module control_unit (
                         `SYS_IMM_MRET:   mret   = 1'b1;
                         `SYS_IMM_WFI:    ;       // legal NOP: nothing to wait for yet
                         default:         illegal = 1'b1; // SFENCE.VMA or garbage - not yet supported
+                    endcase
+                end
+            end
+
+            `OP_AMO: begin
+                if (funct3 != 3'b010) begin
+                    illegal = 1'b1;  // RV32A is word-only; 3'b011 (doubleword) is RV64A-only
+                end else begin
+                    case (funct7[6:2])  // funct5: instruction[31:27]
+                        `AMO_F5_LR, `AMO_F5_SC, `AMO_F5_SWAP, `AMO_F5_ADD,
+                        `AMO_F5_XOR, `AMO_F5_AND, `AMO_F5_OR,
+                        `AMO_F5_MIN, `AMO_F5_MAX, `AMO_F5_MINU, `AMO_F5_MAXU: begin
+                            is_amo    = 1'b1;
+                            reg_write = 1'b1;
+                            alu_src_a = `ASEL_RS1;
+                            alu_op    = `ALU_PASS_A;
+                            result_src = `RESULT_MEM;
+                            mem_read  = 1'b1;
+                            mem_write = (funct7[6:2] != `AMO_F5_LR);
+                        end
+                        default: illegal = 1'b1;  // unrecognized funct5
                     endcase
                 end
             end

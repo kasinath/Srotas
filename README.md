@@ -17,12 +17,12 @@ cycle like water moving downstream.
 
 | | |
 |---|---|
-| ISA | RV32I (all 47 base instructions) + Zicsr (all 6 CSR instructions) + Zifencei + M (multiply/divide) |
+| ISA | RV32I (all 47 base instructions) + Zicsr (all 6 CSR instructions) + Zifencei + M (multiply/divide) + A (atomics) |
 | Pipeline | 5-stage, in-order, single issue |
 | Hazard handling | Full EX/MEM + MEM/WB forwarding, register-file bypass, 1-cycle load-use stall, 32-cycle multi-cycle hold for multiply/divide |
 | Control hazards | Branch/jump resolved in EX, 2-instruction squash, same-cycle redirect |
 | Traps | M-mode `ecall`/`ebreak`/`mret`, illegal-instruction, and misaligned instruction/load/store, all via the same redirect/squash path as branches |
-| Directed regression | **158 / 158 checks passing** |
+| Directed regression | **196 / 196 checks passing** |
 | Verified in | Icarus Verilog **and** Xilinx Vivado 2025.2 (`xvlog`/`xelab`/`xsim`) |
 | Synthesis | Clean elaboration, no latches, no `$readmemh` full-array resets (BRAM-friendly) |
 
@@ -52,6 +52,7 @@ Runs any program built from the RV32I base instruction set:
 | System / traps | `ecall ebreak mret` (M-mode); `wfi` decodes as a NOP; illegal instructions and misaligned instruction/load/store addresses trap |
 | Memory ordering (Zifencei) | `fence fence.i` (both true no-ops — single in-order hart, no caches) |
 | Multiply/divide (M) | `mul mulh mulhsu mulhu div divu rem remu` — 32-cycle iterative shift-add/restoring-division unit, stalls the pipeline while running |
+| Atomics (A) | `lr.w sc.w` and the nine AMO ops (`amoswap.w amoadd.w amoxor.w amoand.w amoor.w amomin.w amomax.w amominu.w amomaxu.w`) — single-cycle read-modify-write against data memory, address-matching reservation for `lr.w`/`sc.w` |
 
 Every one of these is individually exercised by the test suite below —
 not just decoded, but checked against the exact value it should produce.
@@ -281,7 +282,7 @@ correct. A missing commit, an extra commit (e.g. a squashed instruction
 leaking through), or a wrong value are all caught the same way: compared
 against the next item in the queue.
 
-**Coverage (158 checks):**
+**Coverage (196 checks):**
 
 | Section | What it proves |
 |---|---|
@@ -299,6 +300,7 @@ against the next item in the queue.
 | L. Traps | `ecall`/`ebreak`/illegal-instruction/misaligned-load/misaligned-store, one handler reused for all five, each verifying correct `mepc`/`mcause`/`mtval` capture and a clean `mret` return; also proves a misaligned store's write is actually suppressed, not just its (nonexistent) register result |
 | M. FENCE / FENCE.I | Both are true no-ops here; proves neither traps nor disturbs a forwarded dependency across the fence |
 | N. M extension (multiply/divide) | A producer overwritten immediately before a multiply reads it (proves the operand latch samples the correctly forwarded value once, at start, not a stale re-read partway through the 32-cycle hold); a MUL result forwarded via EX/MEM to the next instruction; back-to-back MUL→DIV with no idle cycle; a load-use hazard immediately adjacent to a muldiv; and a taken branch and a trap each immediately following a divide |
+| O. A extension (atomics) | A producer overwritten immediately before an AMO reads its operand (EX/MEM forwarding into the AMO); the AMO's own result consumed by the very next instruction via a load-use stall, not forwarding; a back-to-back `lr.w`→`sc.w` lock-acquire succeeding; `sc.w` failing after an intervening store to the same address invalidates the reservation; and a misaligned `lr.w`/AMO trap that leaves no reservation armed |
 
 ### `tb_program.v` — the "run your own program" template
 
@@ -330,8 +332,8 @@ expectations, the same testbench also dumps the exact program it built
 (`mem/lockstep_test.mem`) and a plain-text trace of every commit and trap
 it observes (`dut_trace.log`) as a side effect of running.
 `tools/golden_model.py` is a from-scratch RV32I + Zicsr + M-mode-trap +
-M-extension instruction-level simulator that executes the same `.mem` file and
-produces the same trace format; `tools/lockstep_compare.py` diffs the two
+M-extension + A-extension instruction-level simulator that executes the
+same `.mem` file and produces the same trace format; `tools/lockstep_compare.py` diffs the two
 event-by-event and reports the first divergence, the same way the
 scoreboard does:
 
@@ -357,12 +359,12 @@ from any real reordering.
 ```
 $ vvp tb_isa_directed.out            (Icarus Verilog)
 ========================================
-RESULT: ALL 158 CHECKS PASSED
+RESULT: ALL 196 CHECKS PASSED
 ========================================
 
 $ xsim tb_isa_directed_snap ...      (Vivado 2025.2 xsim)
 ========================================
-RESULT: ALL 158 CHECKS PASSED
+RESULT: ALL 196 CHECKS PASSED
 ========================================
 
 $ vvp tb_program.out / xsim tb_program_snap ...
@@ -386,7 +388,7 @@ src/
   if_stage/       PC, instruction memory, IF/ID register
   id_stage/       register file, control unit, sign extend, ID/EX register
   ex_stage/       ALU, branch/jump unit, muldiv unit, CSR execution, trap controller, EX/MEM register
-  mem_stage/      data memory, MEM/WB register
+  mem_stage/      data memory, amo_unit (A extension), MEM/WB register
   wb_stage/       writeback mux
   top_level/      srotas_processor.v (top module), hazard_detection.v
   testbenches/    rv32i_encoder.vh, tb_isa_directed.v, tb_program.v, unit tests
@@ -402,7 +404,7 @@ docs/            processor_guide.md (module-by-module reference), roadmap.md
 ### Icarus Verilog
 
 ```bash
-# Full directed regression (158 self-checking assertions)
+# Full directed regression (196 self-checking assertions)
 iverilog -I src/common -I src/testbenches -o sim.out -s tb_isa_directed \
   src/if_stage/*.v src/id_stage/*.v src/ex_stage/*.v src/mem_stage/*.v \
   src/wb_stage/*.v src/csr/*.v src/top_level/hazard_detection.v src/top_level/srotas_processor.v \
@@ -418,7 +420,7 @@ iverilog -I src/common -I src/testbenches -o sim2.out -s tb_program \
 cp sim2.out mem/ && cd mem && vvp sim2.out && cd ..
 ```
 
-Both should end with `RESULT: ALL 158 CHECKS PASSED` / `RESULT: PASS`.
+Both should end with `RESULT: ALL 196 CHECKS PASSED` / `RESULT: PASS`.
 
 ### Vivado
 
@@ -437,7 +439,7 @@ initialization file (Vivado auto-exports it into the simulation run
 directory), and sets `tb_program` as the simulation top. Then, in the Flow
 Navigator: **Run Simulation → Run Behavioral Simulation**.
 
-To run the full 158-check regression instead:
+To run the full 196-check regression instead:
 ```tcl
 set_property top tb_isa_directed [get_filesets sim_1]
 launch_simulation
@@ -499,12 +501,12 @@ To produce a `.mem` file:
 The processor implements the base RV32I integer ISA plus Zicsr (CSR
 read/modify/write instructions), Zifencei (`fence`/`fence.i`, both
 no-ops here), M-mode exception handling (`ecall`/`ebreak`/`mret`,
-illegal instructions, misaligned addresses), and the M extension
-(multiply/divide) — no atomics (A) or compressed (C) extensions yet, and
-no interrupts or privilege modes (S/U) beyond the single M-mode this core
-always runs in — so a compiled program must target
-`-march=rv32im_zicsr_zifencei` and avoid anything that needs an OS,
-interrupts, or those other extensions.
+illegal instructions, misaligned addresses), the M extension
+(multiply/divide), and the A extension (atomics) — no compressed (C)
+extension yet, and no interrupts or privilege modes (S/U) beyond the
+single M-mode this core always runs in — so a compiled program must
+target `-march=rv32ima_zicsr_zifencei` and avoid anything that needs an
+OS, interrupts, or the C extension.
 
 ## Known limitations (current scope, for a single hobby-scale in-order core)
 
@@ -515,8 +517,8 @@ interrupts, or those other extensions.
   (timer/external) yet — `mie`/`mip` exist in the CSR file but nothing
   drives or consumes them.
 - Multiply/divide (M) stalls the pipeline for a fixed 32 cycles per
-  operation — no early-out for small operands, no A-extension (atomics)
-  or C-extension (compressed instructions) yet.
+  operation — no early-out for small operands.
+- No C extension (compressed instructions) yet.
 - Single outstanding memory access per cycle, no caches.
 
 None of these are permanent limits, just what v1 covers — see
@@ -526,12 +528,13 @@ Linux-capable core across future releases.
 ## Contributing
 
 This started as a learning project and is very much still growing.
-Exceptions and CSRs, the M/A extensions, a minimal SoC (UART/CLINT/PLIC),
-privilege modes, an MMU, and eventually booting Linux are all planned as
-incremental releases — see [`docs/roadmap.md`](docs/roadmap.md) for the
-full sequencing and reasoning. Branch prediction and other microarchitecture
-performance work are deliberately *not* planned for this core; see the
-roadmap's "Guiding decisions" for why.
+Exceptions and CSRs, the M and A extensions, a minimal SoC
+(UART/CLINT/PLIC), privilege modes, an MMU, and eventually booting Linux
+are all planned as incremental releases — see
+[`docs/roadmap.md`](docs/roadmap.md) for the full sequencing and
+reasoning. Branch prediction and other microarchitecture performance
+work are deliberately *not* planned for this core; see the roadmap's
+"Guiding decisions" for why.
 
 Contributions, issues, and ideas are welcome from anyone — whether that's
 fixing a bug, adding a feature from the list above, extending the test

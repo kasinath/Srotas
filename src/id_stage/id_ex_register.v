@@ -38,6 +38,13 @@
 // instruction (the one write_en would be holding) to NOT be a muldiv
 // (mem_read=0, no branch/trap paths reachable from is_muldiv) - see
 // hazard_detection.v.
+//
+// is_amo (Phase 2, A extension) is zeroed on flush for the same reason as
+// is_muldiv: it triggers a real MEM-stage side effect (a memory write
+// and/or a reservation-state change in amo_unit.v) once consumed, so a
+// squashed instruction must never carry it forward. amo_funct5 is left
+// unflushed, passing through like funct3/csr_addr - it only selects which
+// AMO operation is_amo would perform, and is inert whenever is_amo is 0.
 // ============================================================================
 
 `timescale 1ns/1ps
@@ -58,6 +65,7 @@ module id_ex_register (
     input  wire [31:0] imm,
     input  wire [2:0]  funct3,
     input  wire [11:0] csr_addr,
+    input  wire [4:0]  amo_funct5,
 
     input  wire        reg_write,
     input  wire [1:0]  alu_src_a,
@@ -76,6 +84,7 @@ module id_ex_register (
     input  wire        mret,
     input  wire        illegal,
     input  wire        is_muldiv,
+    input  wire        is_amo,
 
     output reg  [31:0] pc_out,
     output reg  [31:0] pc_plus4_out,
@@ -87,6 +96,7 @@ module id_ex_register (
     output reg  [31:0] imm_out,
     output reg  [2:0]  funct3_out,
     output reg  [11:0] csr_addr_out,
+    output reg  [4:0]  amo_funct5_out,
 
     output reg         reg_write_out,
     output reg  [1:0]  alu_src_a_out,
@@ -104,7 +114,8 @@ module id_ex_register (
     output reg         ebreak_out,
     output reg         mret_out,
     output reg         illegal_out,
-    output reg         is_muldiv_out
+    output reg         is_muldiv_out,
+    output reg         is_amo_out
 );
 
     always @(posedge clk or negedge rst_n) begin
@@ -119,6 +130,7 @@ module id_ex_register (
             imm_out        <= 32'b0;
             funct3_out     <= 3'b0;
             csr_addr_out   <= 12'b0;
+            amo_funct5_out <= 5'b0;
             reg_write_out  <= 1'b0;
             alu_src_a_out  <= 2'b0;
             alu_src_b_out  <= 1'b0;
@@ -136,6 +148,7 @@ module id_ex_register (
             mret_out       <= 1'b0;
             illegal_out    <= 1'b0;
             is_muldiv_out  <= 1'b0;
+            is_amo_out     <= 1'b0;
         end else if (!write_en) begin
             // EX is busy (multi-cycle muldiv in progress): hold everything,
             // data and control alike. See header comment.
@@ -150,6 +163,7 @@ module id_ex_register (
             imm_out        <= imm;
             funct3_out     <= funct3;
             csr_addr_out   <= csr_addr;
+            amo_funct5_out <= amo_funct5;
             alu_src_a_out  <= alu_src_a;
             alu_src_b_out  <= alu_src_b;
             alu_op_out     <= alu_op;
@@ -169,6 +183,7 @@ module id_ex_register (
                 mret_out       <= 1'b0;
                 illegal_out    <= 1'b0;
                 is_muldiv_out  <= 1'b0;
+                is_amo_out     <= 1'b0;
             end else begin
                 reg_write_out  <= reg_write;
                 mem_read_out   <= mem_read;
@@ -183,6 +198,7 @@ module id_ex_register (
                 mret_out       <= mret;
                 illegal_out    <= illegal;
                 is_muldiv_out  <= is_muldiv;
+                is_amo_out     <= is_amo;
             end
         end
     end

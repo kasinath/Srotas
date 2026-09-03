@@ -79,6 +79,17 @@
 // ex_busy holds off eff_reg_write/eff_mem_read/eff_mem_write every cycle
 // the unit is busy, the same way trap_taken already does - see
 // hazard_detection.v for how ex_busy freezes PC/IF/ID/ID/EX upstream.
+//
+// A-extension fields (is_amo/amo_funct5, Phase 2): pure pass-through here,
+// unlike is_muldiv - the actual read-modify-write happens in MEM
+// (amo_unit.v, mem_stage_top.v), not EX. EX needs no new logic to handle
+// them: an AMO's address is already correctly alu_result (ALU_PASS_A,
+// decoded in control_unit.v), its trap conditions already fall out of the
+// existing mem_read/mem_write/funct3-based misalignment check, and its
+// effect suppression already falls out of the existing eff_mem_read/
+// eff_mem_write (mem_read=1 for every AMO variant is what makes this
+// stage's trap/effect-suppression logic apply to it identically to a
+// plain load/store).
 // ============================================================================
 
 `timescale 1ns/1ps
@@ -115,6 +126,8 @@ module ex_stage_top (
     input  wire        mret,
     input  wire        illegal,
     input  wire        is_muldiv,
+    input  wire        is_amo,
+    input  wire [4:0]  amo_funct5,
 
     // Forwarding
     input  wire [1:0]  forward_a,
@@ -147,7 +160,9 @@ module ex_stage_top (
     output wire        mem_mem_read,
     output wire        mem_mem_write,
     output wire [1:0]  mem_result_src,
-    output wire [31:0] mem_csr_rdata
+    output wire [31:0] mem_csr_rdata,
+    output wire        mem_is_amo,
+    output wire [4:0]  mem_amo_funct5
 );
 
     // ---------------------------------------------------------------
@@ -355,6 +370,8 @@ module ex_stage_top (
         .rd_addr         (rd_addr),
         .funct3          (funct3),
         .csr_rdata       (csr_rdata),
+        .is_amo          (is_amo),
+        .amo_funct5      (amo_funct5),
 
         .reg_write       (eff_reg_write),
         .mem_read        (eff_mem_read),
@@ -367,6 +384,8 @@ module ex_stage_top (
         .rd_addr_out        (mem_rd_addr),
         .funct3_out         (mem_funct3),
         .csr_rdata_out      (mem_csr_rdata),
+        .is_amo_out         (mem_is_amo),
+        .amo_funct5_out     (mem_amo_funct5),
         .reg_write_out      (mem_reg_write),
         .mem_read_out       (mem_mem_read),
         .mem_write_out      (mem_mem_write),

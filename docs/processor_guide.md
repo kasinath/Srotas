@@ -424,6 +424,21 @@ a branch or jump changes control flow.
   the operation. See Section 6 for how the pipeline holds the instruction
   in EX in the first place.
 
+- **A extension (Phase 2) in EX — deliberately almost nothing.** An AMO's
+  address is `rs1` alone: its R-type-shaped encoding has no immediate field
+  at all (`funct5`/`aq`/`rl`/`rs2` occupy those bit positions instead), so
+  routing it through the usual `alu_src_b` (imm-or-`rs2`) mux would either
+  read those bits as a garbage immediate or wrongly add `rs2` into the
+  address. The fix is a new ALU op, **`ALU_PASS_A`** (`alu.v` gains one
+  case arm, `result = operand_a`, ignoring `operand_b` entirely) —
+  `control_unit.v` decodes an AMO with `alu_src_a = ASEL_RS1`, `alu_op =
+  ALU_PASS_A`. Beyond that, EX does no A-extension work of its own: `is_amo`
+  and `amo_funct5` are pure pass-through fields into `ex_mem_register`,
+  unlike `is_muldiv`, which drove a whole unit instantiated right here. The
+  actual read-modify-write happens one stage later, in MEM (Section 7) —
+  see that section, and Section 6, for why A needed no new EX-stage stall
+  the way M did.
+
 - **`ex_stage_top.v`** — integrates the forwarding muxes, ALU, branch unit,
   CSR file, trap controller, muldiv unit, and EX/MEM register, and exposes
   `redirect`/`redirect_target` — the signals that travel all the way back
@@ -618,6 +633,24 @@ problem described in Section 5's `muldiv_unit.v` writeup can't be made
 worse by a *different* register happening to collide - no new instruction
 is ever in flight to introduce one.
 
+### A third case that needed no new stall at all: the A extension (Phase 2)
+
+Given the two stall shapes above, it would be reasonable to guess the A
+extension (`lr.w`/`sc.w`, the AMO ops) needs a third one — MEM stage, after
+all, has never had to stall for anything. It doesn't. `data_memory.v`'s
+read is already combinational and its write already synchronous to the
+same address, so `amo_unit.v`'s read-modify-write (Section 7) fits in the
+one cycle MEM already gets, with no new pipeline register and no change to
+`hazard_detection_unit` at all. The only hazard-detection behavior an AMO
+needs — its consumer stalling one cycle, the way a load's already does —
+falls out of asserting `mem_read=1` for the whole AMO family (decided once,
+in `control_unit.v`): `load_use_hazard`'s existing condition
+(`id_ex_mem_read && ...`) doesn't care *why* `mem_read` is set, only that it
+is. Compare this to M, which needed a brand-new `write_en`/`ex_busy` hold
+specifically because its multi-cycle unit lives in EX and has to occupy
+that stage for longer than one cycle — a problem A's single-cycle MEM-stage
+design simply doesn't have.
+
 ## 7. MEM — Memory Access
 
 **Job:** perform the load or store for instructions that need one; pass
@@ -644,16 +677,63 @@ everything else through untouched.
     extend from the top bit of the loaded value; `LBU`/`LHU` zero-extend).
     Stores just write the low N bytes, little-endian, matching RV32I.
 
+- **`amo_unit.v`** (Phase 2, A extension) — `lr.w`/`sc.w` and the nine AMO
+  read-modify-write ops. Sits between `data_memory`'s read and write ports:
+  its `old_value` input is that same cycle's combinational read output, and
+  its `write_data`/`write_enable` outputs become what `data_memory` actually
+  writes — a single-cycle RMW, not a new stall. This works because
+  `data_memory.v`'s read is already combinational and its write already
+  synchronous to the same address (see above): the old value is stable and
+  observable for the *whole* cycle before the write commits at the next
+  edge, so `mem_stage_top.v` can wire read-output-into-ALU-into-write-input
+  without any new pipeline register at all — the biggest structural
+  difference from the M extension, which needed a genuinely new EX-stage
+  hold (Section 6).
+
+  Owns one small piece of state: a reservation (one address register, one
+  valid bit) for `lr.w`/`sc.w`, using the textbook address-matching model.
+  `lr.w` arms it; `sc.w` always clears it, success or fail; any *other*
+  write to the reserved address (a plain store, or a different AMO) also
+  clears it — three priority-ordered cases, the third one covering both
+  remaining possibilities by simply falling through the first two. The one
+  subtlety: the reservation-set/clear branches are gated on `mem_read`/
+  `mem_write` *as they arrive at MEM* (already trap-suppressed by
+  `ex_stage_top.v`'s `eff_mem_read`/`eff_mem_write`), not on the raw
+  `is_amo` flag — `is_amo` alone isn't trap-aware, so a misaligned `lr.w`
+  still has it set all the way to MEM, and gating on the suppressed signal
+  instead is what stops a trapping `lr.w`/`sc.w` from silently arming or
+  consuming a reservation nothing should have touched. The *output-value*
+  mux doesn't need this same care: `reg_write` is already 0 for a trapped
+  instruction, so nothing downstream ever observes a wrong result
+  regardless.
+
+  An AMO's `rd` result rides the *existing* `RESULT_MEM` path with no new
+  encoding — for `lr.w` and the nine regular ops it's simply the old memory
+  value, exactly what `RESULT_MEM` already means. Only `sc.w`'s result (a
+  0/1 success flag, not a memory value) needs an override, applied to
+  `final_mem_read_data` inside `mem_stage_top.v` before it reaches
+  `mem_wb_register` — the *only* change to the writeback path this whole
+  feature needed. Asserting `mem_read=1` for every AMO variant (decided in
+  `control_unit.v`, including `sc.w` — its result isn't ready before MEM
+  either) is what makes the *existing* load-use hazard protect a consumer
+  for free, the same way it already protects an ordinary load's consumer —
+  no new hazard-detection logic, unlike M's `ex_busy`.
+
 - **`mem_wb_register.v`** — pipeline register into WB. Nothing unusual:
   carries whichever of ALU result / memory data / PC+4 / old CSR value
   might be needed, plus `rd`/`reg_write`/`result_src` so WB knows what to
   do with them.
 
-- **`mem_stage_top.v`** — wires `data_memory` and `mem_wb_register`
-  together; the memory address is always `ex_alu_result`, since address
-  calculation already happened in EX regardless of instruction type. The
-  old CSR value passes straight through this module untouched — data
-  memory has no interaction with it at all.
+- **`mem_stage_top.v`** — wires `data_memory`, `amo_unit.v`, and
+  `mem_wb_register` together; the memory address is always `ex_alu_result`,
+  since address calculation already happened in EX regardless of
+  instruction type (for an AMO, `ALU_PASS_A` in EX already reduced that to
+  plain `rs1`, since AMO's encoding has no immediate field — see Section 5).
+  The old CSR value passes straight through this module untouched — data
+  memory has no interaction with it at all. This module went from a bare
+  passthrough wrapper (Phase 1) to owning its first real logic in Phase 2:
+  the three small muxes selecting between an AMO's computed values and the
+  plain load/store path.
 
 ## 8. WB — Writeback
 
@@ -747,7 +827,7 @@ Both testbenches in `src/testbenches/` are built around that same
 `wb_commit_*` port, on the principle that a testbench should observe the
 processor's architectural effects, not its internal wiring.
 
-- **`tb_isa_directed.v`** — the real regression (158 checks). It builds a
+- **`tb_isa_directed.v`** — the real regression (196 checks). It builds a
   program from `emit(instr)` calls (using the encoder functions in
   `rv32i_encoder.vh`) interleaved with `chk(rd, expected_data)` calls, in
   true program order, forming an expected-commit queue. Because this
@@ -757,9 +837,9 @@ processor's architectural effects, not its internal wiring.
   commit, an extra commit (e.g. a squashed instruction leaking through
   after all), or a wrong value are all caught the same way, by comparing
   against the next queue entry. See `README.md`'s "Testing" section for
-  the full coverage table (sections A–N) and for the three concrete
+  the full coverage table (sections A–O) and for the three concrete
   cycle-by-cycle hazard traces (back-to-back forwarding, a load-use stall,
-  and a taken-branch squash) with actual waveform timing. Three sections
+  and a taken-branch squash) with actual waveform timing. Four sections
   are worth calling out for what they prove *isn't* covered elsewhere,
   because each caught a real bug during development rather than a
   hypothetical one:
@@ -786,18 +866,35 @@ processor's architectural effects, not its internal wiring.
     leave the redirect path mistimed; and a load-use hazard immediately
     adjacent to a muldiv, proving the two different stall shapes (Section
     6) don't interfere with each other.
+  - **Section O** (A extension, Phase 2) mirrors Section N's structure for
+    a different reason each time: a producer overwritten immediately
+    before an AMO's operand needs it (the same forwarding-freshness point
+    as Section N, but via ordinary EX/MEM forwarding here rather than an
+    operand latch, since MEM stage never holds anything); the AMO's own
+    result consumed by the very next instruction, which is a *load-use
+    stall* rather than forwarding - the key architectural difference from
+    how M's result reaches its consumer; a back-to-back `lr.w`→`sc.w`
+    (the actual lock-acquire idiom) succeeding; `sc.w` failing after an
+    intervening plain store to the same address invalidates the
+    reservation; and a misaligned `lr.w` trapping while leaving no
+    reservation armed, proving `amo_unit.v`'s trap-suppression gating
+    (Section 7) isn't just theoretical.
 
 - **`csr_file.v`**, and `control_unit.v`'s and `id_ex_register.v`'s CSR
   *and* trap-classification decode paths, also each have their own
   standalone unit testbenches (`tb_csr_file.v`, `tb_control_unit_csr.v`,
-  `tb_id_ex_register_csr.v`, updated for Phase 2's `is_muldiv`/`write_en`
+  `tb_id_ex_register_csr.v`, updated for both Phase 2 extensions'
   additions) — exercising the module in isolation with a minimal harness
   before it was wired into the full pipeline, the same incremental
-  discipline the rest of this codebase follows. `muldiv_unit.v` gets the
-  same treatment in its own standalone `tb_muldiv_unit.v`: every op, every
-  sign combination, the divide-by-zero and signed-overflow special cases
-  RISC-V mandates never trap, and the busy/done handshake timing including
-  a back-to-back pair with no idle cycle between them. The trap
+  discipline the rest of this codebase follows. `muldiv_unit.v` and
+  `amo_unit.v` each get the same treatment in their own standalone
+  testbenches: `tb_muldiv_unit.v` covers every op, every sign combination,
+  the divide-by-zero and signed-overflow special cases RISC-V mandates
+  never trap, and the busy/done handshake timing including a back-to-back
+  pair with no idle cycle between them; `tb_amo_unit.v` covers all nine
+  regular ops and the reservation model's edge cases (success, no prior
+  `lr.w`, an address mismatch, an intervening write, back-to-back
+  `lr.w`→`sc.w`, and the trap-suppression gating itself). The trap
   controller's *resolution* logic (misalignment detection, cause/value
   selection, redirect priority, effect suppression) has no standalone unit
   test: it's integrated deeply enough into `ex_stage_top.v` (alongside the
@@ -805,9 +902,9 @@ processor's architectural effects, not its internal wiring.
   most of that module: the full-pipeline Section L coverage above is the
   intended verification for it, the same way CSR *execution* (as opposed
   to CSR *decode*) has no standalone test either, and the same way
-  Section N above is the intended verification for `ex_busy`'s pipeline
-  interactions rather than a standalone test of `hazard_detection.v`'s new
-  logic in isolation.
+  Sections N and O above are the intended verification for `ex_busy`'s and
+  `amo_unit.v`'s pipeline interactions rather than standalone tests of
+  `hazard_detection.v`'s and `mem_stage_top.v`'s new logic in isolation.
 
 - **`tb_program.v`** — a template for running an arbitrary compiled
   program from `mem/program.mem`, checking final architectural state
@@ -821,23 +918,31 @@ processor's architectural effects, not its internal wiring.
   own header describes: a hand-authored `chk()` queue predicts what
   should happen, which stops scaling once trap timing and CSR
   interleaving make that prediction hard to do by hand. `golden_model.py`
-  is a from-scratch instruction-level RV32I + Zicsr + M-mode-trap
-  simulator that mirrors this design's specific CSR-masking and
+  is a from-scratch instruction-level RV32I + Zicsr + M-mode-trap +
+  M-extension + A-extension simulator that mirrors this design's specific CSR-masking and
   trap-detection choices (not the general RISC-V spec); `lockstep_compare.py`
   diffs its trace against a real simulation's, event by event.
   `tb_isa_directed.v` dumps both `mem/lockstep_test.mem` (the exact
   program it built) and `dut_trace.log` (every commit and trap it
   observed) as a side effect of running, so the harness's first target is
-  the same 134-check program already hand-verified above - three
-  independent methods (hand-written `chk()`, the golden model, and the
-  RTL) agreeing on all events is the strongest confidence this
-  design currently has - Section N's addition raised this to 164 events,
-  `golden_model.py` gaining a `_muldiv` method (deliberately an if/elif
+  the same program already hand-verified above - three independent
+  methods (hand-written `chk()`, the golden model, and the RTL) agreeing
+  on all events is the strongest confidence this design currently has -
+  Section N's addition raised this to 164 events, and Section O's raised
+  it further to 204. `golden_model.py` gained a `_muldiv` method for
+  Phase 2's M extension (deliberately an if/elif
   chain rather than the dict-literal style `_alu_reg`/`_alu_imm` use,
   since a dict literal evaluates every branch eagerly and would raise a
   Python `ZeroDivisionError` on `DIV x,0` before the intended, spec-
   mandated non-trapping result could ever be selected) plus the `OP_REG`
-  `funct7 == FUNCT7_MULDIV` discriminator mirroring `control_unit.v`'s own.
+  `funct7 == FUNCT7_MULDIV` discriminator mirroring `control_unit.v`'s own;
+  and an `OP_AMO` dispatch arm plus reservation state for the A extension,
+  mirroring `ex_stage_top.v`'s exact per-variant trap-cause choice
+  (`lr.w` reports `LOAD_MISALIGNED` since it never sets `mem_write`;
+  `sc.w` and the nine regular ops report `STORE_MISALIGNED`) - the
+  existing `OP_STORE` arm also gained one addition, clearing the
+  reservation on a plain store to the reserved address, mirroring
+  `amo_unit.v`'s own generic "any other write invalidates it" branch.
   It isn't a live cycle-by-cycle co-simulation
   against something like Spike - no RISC-V toolchain or ISS is available
   in this repo's environment - but a trace diff achieves the same
@@ -850,17 +955,18 @@ processor's architectural effects, not its internal wiring.
 ## 11. Scope and what's deliberately not here
 
 RV32I plus Zicsr (CSR instructions execute, per Section 5), Zifencei
-(`fence`/`fence.i`, both true no-ops per Section 4), and M-mode exception
+(`fence`/`fence.i`, both true no-ops per Section 4), M-mode exception
 handling (`ecall`/`ebreak`/`mret`, illegal instructions, misaligned
-instruction/load/store addresses, per Section 5's trap controller), and now
-the M extension (multiply/divide, per Section 5's `muldiv_unit.v` and
-Section 6's stall-shape writeup) — but no atomics (A extension, next),
-no compressed (C) extension, and no interrupts or S/U privilege modes:
-`mstatus`'s `MPP` field is hardwired to M-mode, and `mie`/`mip` exist in
-`csr_file.v` but nothing drives or consumes them, since there's no timer or
-external interrupt source yet (a CLINT/PLIC-equivalent, a later roadmap
-phase). This closes out `docs/roadmap.md`'s Phase 2, part 1. No branch
-prediction (every taken branch/jump costs a fixed 2-cycle bubble, per
+instruction/load/store addresses, per Section 5's trap controller), the M
+extension (multiply/divide, per Section 5's `muldiv_unit.v` and Section
+6's stall-shape writeup), and now the A extension (atomics, per Section
+7's `amo_unit.v`) — but no compressed (C) extension, and no interrupts or
+S/U privilege modes: `mstatus`'s `MPP` field is hardwired to M-mode, and
+`mie`/`mip` exist in `csr_file.v` but nothing drives or consumes them,
+since there's no timer or external interrupt source yet (a CLINT/PLIC-
+equivalent, a later roadmap phase). This closes out `docs/roadmap.md`'s
+Phase 2. No branch prediction (every taken branch/jump costs a fixed
+2-cycle bubble, per
 Section 6). No caches, single outstanding memory access per cycle. These
 aren't oversights; they're the stated current scope for a single
 hobby-scale in-order core, being built out incrementally — see

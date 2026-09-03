@@ -62,8 +62,15 @@ def sext(value, bits):
 OP_LUI, OP_AUIPC, OP_JAL, OP_JALR = 0b0110111, 0b0010111, 0b1101111, 0b1100111
 OP_BRANCH, OP_LOAD, OP_STORE = 0b1100011, 0b0000011, 0b0100011
 OP_IMM, OP_REG, OP_SYSTEM, OP_MISC_MEM = 0b0010011, 0b0110011, 0b1110011, 0b0001111
+OP_AMO = 0b0101111  # A extension: lr.w/sc.w and the nine AMO ops
 
 FUNCT7_MULDIV = 0b0000001  # M extension: shares OP_REG's opcode
+
+# A extension funct5 (instruction[31:27])
+AMO_F5_LR, AMO_F5_SC = 0b00010, 0b00011
+AMO_F5_SWAP, AMO_F5_ADD = 0b00001, 0b00000
+AMO_F5_XOR, AMO_F5_AND, AMO_F5_OR = 0b00100, 0b01100, 0b01000
+AMO_F5_MIN, AMO_F5_MAX, AMO_F5_MINU, AMO_F5_MAXU = 0b10000, 0b10100, 0b11000, 0b11100
 
 CAUSE_INSTR_MISALIGNED = 0
 CAUSE_ILLEGAL_INSTR = 2
@@ -76,7 +83,7 @@ CSR_MSTATUS, CSR_MISA, CSR_MIE, CSR_MTVEC = 0x300, 0x301, 0x304, 0x305
 CSR_MSCRATCH, CSR_MEPC, CSR_MCAUSE, CSR_MTVAL, CSR_MIP = 0x340, 0x341, 0x342, 0x343, 0x344
 CSR_ID_REGS = {0xF11, 0xF12, 0xF13, 0xF14}  # mvendorid/marchid/mimpid/mhartid
 
-MISA_VAL = 0x40001100  # base ('I', bit 8) + M extension (bit 12), Phase 2
+MISA_VAL = 0x40001101  # base ('I', bit 8) + M (bit 12) + A (bit 0), Phase 2
 
 SYS_IMM_ECALL, SYS_IMM_EBREAK, SYS_IMM_MRET, SYS_IMM_WFI = 0x000, 0x001, 0x302, 0x105
 
@@ -105,6 +112,11 @@ class GoldenModel:
         self.mepc = 0
         self.mcause = 0
         self.mtval = 0
+
+        # A-extension reservation, mirroring amo_unit.v's storage exactly:
+        # one address plus one valid bit.
+        self.reservation_valid = False
+        self.reservation_addr = 0
 
     # -- register file (x0 hardwired to 0, like register_file.v) --------
     def rd_reg(self, i):
@@ -295,6 +307,35 @@ class GoldenModel:
                 if self.mem_misaligned(addr, funct3):
                     raise Trap(CAUSE_STORE_MISALIGNED, addr)
                 self.store_mem(addr, funct3, rs2v)
+                if self.reservation_valid and addr == self.reservation_addr:
+                    self.reservation_valid = False  # any other write to it invalidates it
+            elif opcode == OP_AMO:
+                funct5 = (funct7 >> 2) & 0x1F
+                addr = rs1v  # no immediate in this encoding - address is rs1 alone
+                # lr.w never sets mem_write (matches control_unit.v), so its
+                # misalignment reports LOAD_MISALIGNED; sc.w and the nine
+                # regular AMOs all set mem_write, reporting STORE_MISALIGNED -
+                # mirroring ex_stage_top.v's mem_write ? STORE : LOAD choice.
+                if self.mem_misaligned(addr, 0b010):
+                    cause = CAUSE_LOAD_MISALIGNED if funct5 == AMO_F5_LR else CAUSE_STORE_MISALIGNED
+                    raise Trap(cause, addr)
+                old = self.load_mem(addr, 0b010)
+                if funct5 == AMO_F5_LR:
+                    self.reservation_valid = True
+                    self.reservation_addr = addr
+                    result, reg_write = old, True
+                elif funct5 == AMO_F5_SC:
+                    success = self.reservation_valid and self.reservation_addr == addr
+                    self.reservation_valid = False  # sc.w always clears it, success or fail
+                    if success:
+                        self.store_mem(addr, 0b010, rs2v)
+                    result, reg_write = (0 if success else 1), True
+                else:
+                    new = self._amo_alu(funct5, old, rs2v)
+                    self.store_mem(addr, 0b010, new)
+                    if self.reservation_valid and self.reservation_addr == addr:
+                        self.reservation_valid = False
+                    result, reg_write = old, True
             elif opcode == OP_IMM:
                 result, reg_write = self._alu_imm(funct3, funct7, rs1v, imm_i), True
             elif opcode == OP_REG:
@@ -407,6 +448,29 @@ class GoldenModel:
         if b == 0:
             return u32(a)
         return u32(a % b)
+
+    def _amo_alu(self, funct5, old, operand):
+        # RV32A's nine regular ops (excludes lr.w/sc.w, handled by the
+        # caller directly since they aren't a simple old-OP-operand
+        # reduction).
+        if funct5 == AMO_F5_SWAP:
+            return u32(operand)
+        if funct5 == AMO_F5_ADD:
+            return u32(old + operand)
+        if funct5 == AMO_F5_XOR:
+            return u32(old ^ operand)
+        if funct5 == AMO_F5_AND:
+            return u32(old & operand)
+        if funct5 == AMO_F5_OR:
+            return u32(old | operand)
+        if funct5 == AMO_F5_MIN:
+            return old if s32(old) < s32(operand) else operand
+        if funct5 == AMO_F5_MAX:
+            return old if s32(old) > s32(operand) else operand
+        if funct5 == AMO_F5_MINU:
+            return old if old < operand else operand
+        # AMO_F5_MAXU
+        return old if old > operand else operand
 
     def _csr_instr(self, funct3, addr, rs1_field, rs1v):
         use_imm = bool(funct3 & 0b100)
