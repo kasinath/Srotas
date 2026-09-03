@@ -13,6 +13,11 @@
 // representative values only to exercise the register; tb_isa_directed.v's
 // regression already covers this module's pre-existing flush/stall
 // behavior end to end.
+//
+// Also covers the Phase 2 additions: is_muldiv passing through on a clean
+// cycle and zeroed on flush (grouped with the other side-effect signals),
+// and the new write_en port - a full hold of every field, data and control
+// alike, used while the EX-stage multi-cycle muldiv unit is busy.
 // ============================================================================
 
 `timescale 1ns/1ps
@@ -23,18 +28,23 @@ module tb_id_ex_register_csr;
     reg clk = 0;
     reg rst_n;
     reg flush;
+    reg write_en;
 
     reg [1:0]  csr_op;
     reg        csr_use_imm;
     reg [11:0] csr_addr;
     reg        reg_write, mem_read, mem_write, branch, jump, is_jalr;
     reg        ecall, ebreak, mret, illegal;
+    reg        is_muldiv;
+    reg [4:0]  rd_addr;
 
     wire [1:0]  csr_op_out;
     wire        csr_use_imm_out;
     wire [11:0] csr_addr_out;
     wire        reg_write_out, mem_read_out, mem_write_out, branch_out, jump_out, is_jalr_out;
     wire        ecall_out, ebreak_out, mret_out, illegal_out;
+    wire        is_muldiv_out;
+    wire [4:0]  rd_addr_out;
 
     integer errors;
     integer checks;
@@ -43,12 +53,13 @@ module tb_id_ex_register_csr;
         .clk       (clk),
         .rst_n     (rst_n),
         .flush     (flush),
+        .write_en  (write_en),
 
         .pc        (32'b0),
         .pc_plus4  (32'b0),
         .rs1_addr  (5'b0),
         .rs2_addr  (5'b0),
-        .rd_addr   (5'b0),
+        .rd_addr   (rd_addr),
         .rs1_data  (32'b0),
         .rs2_data  (32'b0),
         .imm       (32'b0),
@@ -71,12 +82,13 @@ module tb_id_ex_register_csr;
         .ebreak      (ebreak),
         .mret        (mret),
         .illegal     (illegal),
+        .is_muldiv   (is_muldiv),
 
         .pc_out         (),
         .pc_plus4_out   (),
         .rs1_addr_out   (),
         .rs2_addr_out   (),
-        .rd_addr_out    (),
+        .rd_addr_out    (rd_addr_out),
         .rs1_data_out   (),
         .rs2_data_out   (),
         .imm_out        (),
@@ -98,7 +110,8 @@ module tb_id_ex_register_csr;
         .ecall_out       (ecall_out),
         .ebreak_out      (ebreak_out),
         .mret_out        (mret_out),
-        .illegal_out     (illegal_out)
+        .illegal_out     (illegal_out),
+        .is_muldiv_out   (is_muldiv_out)
     );
 
     always #5 clk = ~clk;
@@ -148,10 +161,11 @@ module tb_id_ex_register_csr;
     initial begin
         errors = 0;
         checks = 0;
-        rst_n = 0; flush = 0;
+        rst_n = 0; flush = 0; write_en = 1'b1;
         csr_op = 2'b00; csr_use_imm = 1'b0; csr_addr = 12'b0;
         reg_write = 1'b0; mem_read = 1'b0; mem_write = 1'b0; branch = 1'b0; jump = 1'b0; is_jalr = 1'b0;
-        ecall = 1'b0; ebreak = 1'b0; mret = 1'b0; illegal = 1'b0;
+        ecall = 1'b0; ebreak = 1'b0; mret = 1'b0; illegal = 1'b0; is_muldiv = 1'b0;
+        rd_addr = 5'b0;
         @(negedge clk);
         rst_n = 1'b1;
 
@@ -180,9 +194,9 @@ module tb_id_ex_register_csr;
         check1(csr_use_imm_out, 1'b0);
         check12(csr_addr_out, `CSR_MEPC);
 
-        // ecall/ebreak/mret/illegal passthrough, no flush (one at a time,
-        // matching how control_unit.v only ever asserts one of these per
-        // instruction).
+        // ecall/ebreak/mret/illegal/is_muldiv passthrough, no flush (one at
+        // a time, matching how control_unit.v only ever asserts one of
+        // these per instruction).
         csr_op = 2'b00;
         ecall = 1'b1;
         @(negedge clk);
@@ -191,16 +205,20 @@ module tb_id_ex_register_csr;
         @(negedge clk);
         check1(ecall_out, 1'b0);
         check1(illegal_out, 1'b1);
-        illegal = 1'b0;
+        illegal = 1'b0; is_muldiv = 1'b1; reg_write = 1'b1;
+        @(negedge clk);
+        check1(illegal_out, 1'b0);
+        check1(is_muldiv_out, 1'b1);
+        is_muldiv = 1'b0;
 
-        // ---------------- Flush: csr_op/ecall/ebreak/mret/illegal zeroed, csr_use_imm/csr_addr pass through ----------------
+        // ---------------- Flush: csr_op/ecall/ebreak/mret/illegal/is_muldiv zeroed, csr_use_imm/csr_addr pass through ----------------
         csr_op = `CSR_OP_RW; csr_use_imm = 1'b1; csr_addr = `CSR_MCAUSE;
         reg_write = 1'b1; mem_read = 1'b1; mem_write = 1'b1; branch = 1'b1; jump = 1'b1; is_jalr = 1'b1;
-        ecall = 1'b1; ebreak = 1'b1; mret = 1'b1; illegal = 1'b1;
+        ecall = 1'b1; ebreak = 1'b1; mret = 1'b1; illegal = 1'b1; is_muldiv = 1'b1;
         flush = 1'b1;
         @(negedge clk);
         flush = 1'b0;
-        ecall = 1'b0; ebreak = 1'b0; mret = 1'b0; illegal = 1'b0;
+        ecall = 1'b0; ebreak = 1'b0; mret = 1'b0; illegal = 1'b0; is_muldiv = 1'b0;
         check2(csr_op_out, 2'b00);          // zeroed like the other side-effect signals
         check1(csr_use_imm_out, 1'b1);      // NOT zeroed - passes through like alu_src_a/alu_src_b
         check12(csr_addr_out, `CSR_MCAUSE); // NOT zeroed - passes through like rd_addr
@@ -214,12 +232,45 @@ module tb_id_ex_register_csr;
         check1(ebreak_out, 1'b0);
         check1(mret_out, 1'b0);
         check1(illegal_out, 1'b0);
+        check1(is_muldiv_out, 1'b0);
 
         // ---------------- Post-flush cycle: normal passthrough resumes ----------------
         csr_op = `CSR_OP_RW; reg_write = 1'b1;
         @(negedge clk);
         check2(csr_op_out, `CSR_OP_RW);
         check1(reg_write_out, 1'b1);
+
+        // ---------------- write_en=0: full hold, data and control alike ----------------
+        // Models the EX-stage multi-cycle muldiv unit being busy: the
+        // instruction already latched into ID/EX must stay exactly as it
+        // is, even though the ID-stage inputs keep changing underneath
+        // (mirroring hazard_detection.v holding if_id_write_en too, so ID
+        // itself is also frozen - this testbench just proves the register
+        // ignores its inputs regardless of what they do).
+        csr_op = `CSR_OP_RS; is_muldiv = 1'b1; rd_addr = 5'd7; reg_write = 1'b1;
+        @(negedge clk);
+        check2(csr_op_out, `CSR_OP_RS);
+        check1(is_muldiv_out, 1'b1);
+        check1(rd_addr_out, 5'd7);
+        write_en = 1'b0;
+        // Change every input while held - none of it should reach the
+        // outputs, including a flush (matches the design invariant that
+        // flush and write_en=0 never coexist in real use, but a held
+        // register must not accept ANY input change regardless).
+        csr_op = `CSR_OP_RC; is_muldiv = 1'b0; rd_addr = 5'd3; reg_write = 1'b0;
+        @(negedge clk);
+        check2(csr_op_out, `CSR_OP_RS);   // unchanged
+        check1(is_muldiv_out, 1'b1);      // unchanged
+        check1(rd_addr_out, 5'd7);        // unchanged
+        check1(reg_write_out, 1'b1);      // unchanged
+        @(negedge clk);
+        check2(csr_op_out, `CSR_OP_RS);   // still held a second cycle
+        check1(rd_addr_out, 5'd7);
+        write_en = 1'b1;
+        @(negedge clk);
+        check2(csr_op_out, `CSR_OP_RC);   // resumes now that write_en is back
+        check1(is_muldiv_out, 1'b0);
+        check1(rd_addr_out, 5'd3);
 
         $display("");
         $display("========================================");

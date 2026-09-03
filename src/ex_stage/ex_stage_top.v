@@ -66,6 +66,19 @@
 // (target mtvec_q) and mret (target mepc_q) both take priority over an
 // ordinary branch/jump redirect, since a trapping branch/jump must not
 // also be allowed to redirect to its own (possibly bad) target.
+//
+// M-extension unit (Phase 2): muldiv_unit.v lives here too, fed the SAME
+// forwarded operands (rs1_fwd/rs2_fwd) the ALU uses - it latches them
+// internally on the cycle it starts, since EX/MEM and MEM/WB keep draining
+// while ID/EX is held busy, so the live forwarded values could otherwise
+// drift mid-operation. Its result replaces alu_result (not a new
+// result_src encoding - that 2-bit space is already fully used) on the way
+// into ex_mem_register, via ex_result below; every other consumer of the
+// raw alu_result wire (branch_unit, the misalignment checks) is unaffected
+// because a muldiv instruction is never a branch, jump, load, or store.
+// ex_busy holds off eff_reg_write/eff_mem_read/eff_mem_write every cycle
+// the unit is busy, the same way trap_taken already does - see
+// hazard_detection.v for how ex_busy freezes PC/IF/ID/ID/EX upstream.
 // ============================================================================
 
 `timescale 1ns/1ps
@@ -101,6 +114,7 @@ module ex_stage_top (
     input  wire        ebreak,
     input  wire        mret,
     input  wire        illegal,
+    input  wire        is_muldiv,
 
     // Forwarding
     input  wire [1:0]  forward_a,
@@ -111,6 +125,9 @@ module ex_stage_top (
     // Branch/jump resolution, back to IF stage
     output wire         redirect,
     output wire [31:0]  redirect_target,
+
+    // Multi-cycle muldiv unit busy, back to hazard_detection_unit
+    output wire         ex_busy,
 
     // Trap debug/observation port (not part of the datapath - lets an
     // external monitor, e.g. the lockstep harness in tools/, see a trap
@@ -174,6 +191,29 @@ module ex_stage_top (
         .result    (alu_result),
         .zero      (alu_zero)
     );
+
+    // ---------------------------------------------------------------
+    // M-extension: multi-cycle multiply/divide unit
+    // ---------------------------------------------------------------
+    wire [31:0] muldiv_result;
+
+    muldiv_unit u_muldiv_unit (
+        .clk       (clk),
+        .rst_n     (rst_n),
+        .req       (is_muldiv),
+        .op        (funct3),
+        .operand_a (rs1_fwd),
+        .operand_b (rs2_fwd),
+        .busy      (ex_busy),
+        .done      (),
+        .result    (muldiv_result)
+    );
+
+    // Replaces alu_result on the way into EX/MEM for a muldiv instruction;
+    // every other consumer below (branch_unit, misalignment checks) keeps
+    // reading the raw ALU output, which is fine - a muldiv is never a
+    // branch, jump, load, or store.
+    wire [31:0] ex_result = is_muldiv ? muldiv_result : alu_result;
 
     wire        branch_redirect;
     wire [31:0] branch_redirect_target;
@@ -293,18 +333,24 @@ module ex_stage_top (
                               mret       ? mepc_q  :
                                            branch_redirect_target;
 
-    // A trapping instruction completes none of its normal effects - these
-    // feed ex_mem_register in place of the raw control signals below.
-    wire eff_reg_write = reg_write && !trap_taken;
-    wire eff_mem_read  = mem_read  && !trap_taken;
-    wire eff_mem_write = mem_write && !trap_taken;
+    // A trapping instruction completes none of its normal effects, and
+    // neither does a muldiv instruction on any cycle it's still busy - both
+    // feed ex_mem_register in place of the raw control signals below. (A
+    // muldiv is never itself trap_taken - illegal/ecall/ebreak/instr_
+    // misaligned/mem_misaligned are all false for it by construction, since
+    // it sets none of branch/jump/mem_read/mem_write/ecall/ebreak/illegal -
+    // so these two suppression sources never overlap for the same
+    // instruction, they just both apply cleanly across different ones.)
+    wire eff_reg_write = reg_write && !trap_taken && !ex_busy;
+    wire eff_mem_read  = mem_read  && !trap_taken && !ex_busy;
+    wire eff_mem_write = mem_write && !trap_taken && !ex_busy;
 
     ex_mem_register u_ex_mem_register (
         .clk             (clk),
         .rst_n           (rst_n),
 
         .pc_plus4        (pc_plus4),
-        .alu_result      (alu_result),
+        .alu_result      (ex_result),
         .mem_write_data  (store_data),
         .rd_addr         (rd_addr),
         .funct3          (funct3),

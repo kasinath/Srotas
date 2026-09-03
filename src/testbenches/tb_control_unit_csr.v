@@ -11,6 +11,13 @@
 // disturbed anything else. control_unit is purely combinational, so it's
 // exercised directly rather than through a full pipeline run -
 // tb_isa_directed.v's Section L is the full-pipeline trap regression.
+//
+// Also covers the Phase 2 M-extension decode: all eight OP_REG/
+// FUNCT7_MULDIV encodings setting is_muldiv (and nothing else OP_REG
+// wouldn't already set), plus the regression this closes - a muldiv
+// encoding no longer silently decoding as ADD/SUB/etc. through the base
+// R-type funct3 case (funct7[5], which the base ops key off of, happens to
+// be 0 for FUNCT7_MULDIV too).
 // ============================================================================
 
 `timescale 1ns/1ps
@@ -40,6 +47,7 @@ module tb_control_unit_csr;
     wire        ebreak;
     wire        mret;
     wire        illegal;
+    wire        is_muldiv;
 
     integer errors;
     integer checks;
@@ -65,7 +73,8 @@ module tb_control_unit_csr;
         .ecall       (ecall),
         .ebreak      (ebreak),
         .mret        (mret),
-        .illegal     (illegal)
+        .illegal     (illegal),
+        .is_muldiv   (is_muldiv)
     );
 
     task check1;
@@ -147,6 +156,24 @@ module tb_control_unit_csr;
         end
     endtask
 
+    // Applies one OP_REG/FUNCT7_MULDIV funct3 and checks is_muldiv fires
+    // with nothing else OP_REG wouldn't already set.
+    task check_muldiv;
+        input [2:0] f3;
+        begin
+            opcode = `OP_REG; funct3 = f3; funct7 = `FUNCT7_MULDIV;
+            #1;
+            check1(reg_write, 1'b1);
+            check1(is_muldiv, 1'b1);
+            check2(result_src, `RESULT_ALU);
+            check1(mem_read, 1'b0);
+            check1(mem_write, 1'b0);
+            check1(branch, 1'b0);
+            check1(jump, 1'b0);
+            check1(illegal, 1'b0);
+        end
+    endtask
+
     initial begin
         errors = 0;
         checks = 0;
@@ -172,6 +199,16 @@ module tb_control_unit_csr;
         check1(illegal, 1'b1);
         check1(reg_write, 1'b0);
 
+        // ---------------- M extension: all eight OP_REG/FUNCT7_MULDIV encodings ----------------
+        check_muldiv(`FUNCT3_MUL);
+        check_muldiv(`FUNCT3_MULH);
+        check_muldiv(`FUNCT3_MULHSU);
+        check_muldiv(`FUNCT3_MULHU);
+        check_muldiv(`FUNCT3_DIV);
+        check_muldiv(`FUNCT3_DIVU);
+        check_muldiv(`FUNCT3_REM);
+        check_muldiv(`FUNCT3_REMU);
+
         // ---------------- Regression: pre-existing opcodes unaffected ----------------
         opcode = `OP_REG; funct3 = 3'b000; funct7 = 7'b0; // ADD
         #1;
@@ -180,6 +217,17 @@ module tb_control_unit_csr;
         check2(result_src, `RESULT_ALU);
         check2(csr_op, 2'b00);
         check1(illegal, 1'b0);
+        check1(is_muldiv, 1'b0);
+
+        opcode = `OP_REG; funct3 = 3'b000; funct7 = 7'b0100000; // SUB
+        #1;
+        check4(alu_op, `ALU_SUB);
+        check1(is_muldiv, 1'b0);
+
+        opcode = `OP_REG; funct3 = 3'b101; funct7 = 7'b0100000; // SRA
+        #1;
+        check4(alu_op, `ALU_SRA);
+        check1(is_muldiv, 1'b0);
 
         opcode = `OP_LOAD; funct3 = `FUNCT3_LW; funct7 = 7'b0; // LW
         #1;

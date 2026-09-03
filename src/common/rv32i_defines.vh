@@ -81,6 +81,22 @@
 `define FUNCT3_BLTU 3'b110
 `define FUNCT3_BGEU 3'b111
 
+// ---------------------------------------------------------------------------
+// M extension (Zmmul... full M: multiply/divide). Shares OP_REG with the
+// base ALU R-type ops; funct7 distinguishes the two (control_unit.v).
+// funct3 gives the 8 sub-ops directly - no separate ALU-op-style encoding
+// needed since muldiv_unit.v takes funct3 as its own `op` input.
+// ---------------------------------------------------------------------------
+`define FUNCT7_MULDIV 7'b0000001
+`define FUNCT3_MUL    3'b000
+`define FUNCT3_MULH   3'b001
+`define FUNCT3_MULHSU 3'b010
+`define FUNCT3_MULHU  3'b011
+`define FUNCT3_DIV    3'b100
+`define FUNCT3_DIVU   3'b101
+`define FUNCT3_REM    3'b110
+`define FUNCT3_REMU   3'b111
+
 `define NOP_INSTR 32'h00000013  // addi x0, x0, 0
 
 // ---------------------------------------------------------------------------

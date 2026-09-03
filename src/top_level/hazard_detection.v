@@ -34,6 +34,28 @@
 //    and mem_read=1 is required for a load-use hazard, so the two
 //    conditions were mutually exclusive by construction. That's no longer
 //    true once a load itself can trap.
+//
+// 4) EX-stage multi-cycle hold (Phase 2, the M extension): ex_busy is
+//    asserted for as long as the multi-cycle muldiv unit in EX is running.
+//    Unlike the load-use stall above - which bubbles ID/EX forward while
+//    letting the load itself continue into MEM - a busy muldiv must stay
+//    IN EX; ID/EX has to be held in place, not flushed, or its operands
+//    would be overwritten mid-computation by the next ID-stage instruction.
+//    So ex_busy freezes PC, IF/ID, AND ID/EX (via the new id_ex_write_en),
+//    while ex_stage_top.v suppresses the held instruction's effects into
+//    EX/MEM every cycle it's busy, the same way it already suppresses a
+//    trapping instruction's effects - see docs/processor_guide.md Section 6
+//    for the two stall shapes side by side.
+//
+//    ex_busy and id_ex_flush (load_use_hazard || ex_redirect) never overlap
+//    by construction: while busy, the instruction held in ID/EX is a
+//    muldiv, so id_ex_mem_read is 0 (no load-use hazard can be detected
+//    against it) and none of ex_stage_top.v's redirect conditions (branch/
+//    jump/trap) can be true for it either - a muldiv is none of those. So
+//    id_ex_write_en=0 and id_ex_flush=1 are never both asserted for the
+//    same instruction; if they ever were, id_ex_register.v's write_en check
+//    takes priority (a full hold), matching if_id_register.v's precedent
+//    of flush/hold ordering being resolved the same way in that register.
 // ============================================================================
 
 `timescale 1ns/1ps
@@ -60,11 +82,15 @@ module hazard_detection_unit (
     // Branch/jump resolution, combinational from EX this cycle
     input  wire       ex_redirect,
 
+    // EX-stage multi-cycle muldiv unit (Phase 2), combinational from EX
+    input  wire       ex_busy,
+
     // Pipeline control
     output wire        pc_write_en,
     output wire        if_id_write_en,
     output wire        if_id_flush,
     output wire        id_ex_flush,
+    output wire        id_ex_write_en,
 
     // Forwarding selects for the EX stage
     output wire [1:0]  forward_a,
@@ -75,10 +101,11 @@ module hazard_detection_unit (
         id_ex_mem_read && (id_ex_rd_addr != 5'd0) &&
         ((id_ex_rd_addr == id_rs1_addr) || (id_ex_rd_addr == id_rs2_addr));
 
-    assign pc_write_en    = !load_use_hazard || ex_redirect;
-    assign if_id_write_en = !load_use_hazard;
+    assign pc_write_en    = (!load_use_hazard && !ex_busy) || ex_redirect;
+    assign if_id_write_en = !load_use_hazard && !ex_busy;
     assign if_id_flush    = ex_redirect;
     assign id_ex_flush    = load_use_hazard || ex_redirect;
+    assign id_ex_write_en = !ex_busy;
 
     assign forward_a =
         (ex_mem_reg_write && (ex_mem_rd_addr != 5'd0) && (ex_mem_rd_addr == id_ex_rs1_addr)) ? 2'b01 :

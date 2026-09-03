@@ -23,6 +23,17 @@
 // way branches are: control_unit.v only classifies the instruction, and
 // ex_stage_top.v is where a resulting PC redirect and pipeline squash
 // actually happen (see docs/roadmap.md, Phase 1).
+//
+// M extension (mul/div, Phase 2): shares OP_REG's opcode with the base
+// R-type ALU ops, distinguished by funct7 == FUNCT7_MULDIV (0000001) rather
+// than the funct7[5] bit the base ops use for SUB/SRA. This check must come
+// before the base R-type funct3 case, not after: FUNCT7_MULDIV has bit 5
+// clear, so without an explicit check a muldiv encoding falls straight
+// through the existing case and silently decodes as ADD/SLL/etc. instead of
+// as a multiply/divide - the same class of bug Phase 1 found with FENCE
+// falling into the illegal-instruction default. alu_op is left at its
+// default for a muldiv instruction; it's never consumed, since
+// ex_stage_top.v routes muldiv_unit's result in place of the ALU's.
 // ============================================================================
 
 `timescale 1ns/1ps
@@ -51,7 +62,8 @@ module control_unit (
     output reg        ecall,
     output reg        ebreak,
     output reg        mret,
-    output reg        illegal
+    output reg        illegal,
+    output reg        is_muldiv
 );
 
     always @(*) begin
@@ -73,6 +85,7 @@ module control_unit (
         ebreak      = 1'b0;
         mret        = 1'b0;
         illegal     = 1'b0;
+        is_muldiv   = 1'b0;
 
         case (opcode)
             `OP_LUI: begin
@@ -166,17 +179,21 @@ module control_unit (
                 alu_src_a  = `ASEL_RS1;
                 alu_src_b  = 1'b0;
                 imm_format = `IMM_I; // don't-care for R-type
-                case (funct3)
-                    3'b000: alu_op = funct7[5] ? `ALU_SUB : `ALU_ADD;             // SUB/ADD
-                    3'b001: alu_op = `ALU_SLL;                                    // SLL
-                    3'b010: alu_op = `ALU_SLT;                                    // SLT
-                    3'b011: alu_op = `ALU_SLTU;                                   // SLTU
-                    3'b100: alu_op = `ALU_XOR;                                    // XOR
-                    3'b101: alu_op = funct7[5] ? `ALU_SRA : `ALU_SRL;             // SRA/SRL
-                    3'b110: alu_op = `ALU_OR;                                     // OR
-                    3'b111: alu_op = `ALU_AND;                                    // AND
-                    default: alu_op = `ALU_ADD;
-                endcase
+                if (funct7 == `FUNCT7_MULDIV) begin
+                    is_muldiv = 1'b1; // funct3 selects the specific op in EX
+                end else begin
+                    case (funct3)
+                        3'b000: alu_op = funct7[5] ? `ALU_SUB : `ALU_ADD;             // SUB/ADD
+                        3'b001: alu_op = `ALU_SLL;                                    // SLL
+                        3'b010: alu_op = `ALU_SLT;                                    // SLT
+                        3'b011: alu_op = `ALU_SLTU;                                   // SLTU
+                        3'b100: alu_op = `ALU_XOR;                                    // XOR
+                        3'b101: alu_op = funct7[5] ? `ALU_SRA : `ALU_SRL;             // SRA/SRL
+                        3'b110: alu_op = `ALU_OR;                                     // OR
+                        3'b111: alu_op = `ALU_AND;                                    // AND
+                        default: alu_op = `ALU_ADD;
+                    endcase
+                end
             end
 
             `OP_SYSTEM: begin

@@ -17,12 +17,12 @@ cycle like water moving downstream.
 
 | | |
 |---|---|
-| ISA | RV32I (all 47 base instructions) + Zicsr (all 6 CSR instructions) + Zifencei |
+| ISA | RV32I (all 47 base instructions) + Zicsr (all 6 CSR instructions) + Zifencei + M (multiply/divide) |
 | Pipeline | 5-stage, in-order, single issue |
-| Hazard handling | Full EX/MEM + MEM/WB forwarding, register-file bypass, 1-cycle load-use stall |
+| Hazard handling | Full EX/MEM + MEM/WB forwarding, register-file bypass, 1-cycle load-use stall, 32-cycle multi-cycle hold for multiply/divide |
 | Control hazards | Branch/jump resolved in EX, 2-instruction squash, same-cycle redirect |
 | Traps | M-mode `ecall`/`ebreak`/`mret`, illegal-instruction, and misaligned instruction/load/store, all via the same redirect/squash path as branches |
-| Directed regression | **134 / 134 checks passing** |
+| Directed regression | **158 / 158 checks passing** |
 | Verified in | Icarus Verilog **and** Xilinx Vivado 2025.2 (`xvlog`/`xelab`/`xsim`) |
 | Synthesis | Clean elaboration, no latches, no `$readmemh` full-array resets (BRAM-friendly) |
 
@@ -51,6 +51,7 @@ Runs any program built from the RV32I base instruction set:
 | CSR (Zicsr) | `csrrw csrrs csrrc csrrwi csrrsi csrrci` against `mstatus mie mtvec mscratch mepc mcause mtval` etc. |
 | System / traps | `ecall ebreak mret` (M-mode); `wfi` decodes as a NOP; illegal instructions and misaligned instruction/load/store addresses trap |
 | Memory ordering (Zifencei) | `fence fence.i` (both true no-ops — single in-order hart, no caches) |
+| Multiply/divide (M) | `mul mulh mulhsu mulhu div divu rem remu` — 32-cycle iterative shift-add/restoring-division unit, stalls the pipeline while running |
 
 Every one of these is individually exercised by the test suite below —
 not just decoded, but checked against the exact value it should produce.
@@ -280,7 +281,7 @@ correct. A missing commit, an extra commit (e.g. a squashed instruction
 leaking through), or a wrong value are all caught the same way: compared
 against the next item in the queue.
 
-**Coverage (134 checks):**
+**Coverage (158 checks):**
 
 | Section | What it proves |
 |---|---|
@@ -297,6 +298,7 @@ against the next item in the queue.
 | K. All 6 CSR (Zicsr) instructions | `csrrw/csrrs/csrrc/csrrwi/csrrsi/csrrci` against `mscratch`; a GPR value forwarded into a CSR write, and a CSR-produced value forwarded via EX/MEM to the next instruction |
 | L. Traps | `ecall`/`ebreak`/illegal-instruction/misaligned-load/misaligned-store, one handler reused for all five, each verifying correct `mepc`/`mcause`/`mtval` capture and a clean `mret` return; also proves a misaligned store's write is actually suppressed, not just its (nonexistent) register result |
 | M. FENCE / FENCE.I | Both are true no-ops here; proves neither traps nor disturbs a forwarded dependency across the fence |
+| N. M extension (multiply/divide) | A producer overwritten immediately before a multiply reads it (proves the operand latch samples the correctly forwarded value once, at start, not a stale re-read partway through the 32-cycle hold); a MUL result forwarded via EX/MEM to the next instruction; back-to-back MUL→DIV with no idle cycle; a load-use hazard immediately adjacent to a muldiv; and a taken branch and a trap each immediately following a divide |
 
 ### `tb_program.v` — the "run your own program" template
 
@@ -327,8 +329,8 @@ expected sequence hard to compute by hand (see `docs/roadmap.md`, Phase
 expectations, the same testbench also dumps the exact program it built
 (`mem/lockstep_test.mem`) and a plain-text trace of every commit and trap
 it observes (`dut_trace.log`) as a side effect of running.
-`tools/golden_model.py` is a from-scratch RV32I + Zicsr + M-mode-trap
-instruction-level simulator that executes the same `.mem` file and
+`tools/golden_model.py` is a from-scratch RV32I + Zicsr + M-mode-trap +
+M-extension instruction-level simulator that executes the same `.mem` file and
 produces the same trace format; `tools/lockstep_compare.py` diffs the two
 event-by-event and reports the first divergence, the same way the
 scoreboard does:
@@ -355,12 +357,12 @@ from any real reordering.
 ```
 $ vvp tb_isa_directed.out            (Icarus Verilog)
 ========================================
-RESULT: ALL 134 CHECKS PASSED
+RESULT: ALL 158 CHECKS PASSED
 ========================================
 
 $ xsim tb_isa_directed_snap ...      (Vivado 2025.2 xsim)
 ========================================
-RESULT: ALL 134 CHECKS PASSED
+RESULT: ALL 158 CHECKS PASSED
 ========================================
 
 $ vvp tb_program.out / xsim tb_program_snap ...
@@ -383,7 +385,7 @@ src/
   csr/            csr_file.v - the CSR register file
   if_stage/       PC, instruction memory, IF/ID register
   id_stage/       register file, control unit, sign extend, ID/EX register
-  ex_stage/       ALU, branch/jump unit, CSR execution, trap controller, EX/MEM register
+  ex_stage/       ALU, branch/jump unit, muldiv unit, CSR execution, trap controller, EX/MEM register
   mem_stage/      data memory, MEM/WB register
   wb_stage/       writeback mux
   top_level/      srotas_processor.v (top module), hazard_detection.v
@@ -400,10 +402,10 @@ docs/            processor_guide.md (module-by-module reference), roadmap.md
 ### Icarus Verilog
 
 ```bash
-# Full directed regression (134 self-checking assertions)
+# Full directed regression (158 self-checking assertions)
 iverilog -I src/common -I src/testbenches -o sim.out -s tb_isa_directed \
   src/if_stage/*.v src/id_stage/*.v src/ex_stage/*.v src/mem_stage/*.v \
-  src/wb_stage/*.v src/top_level/hazard_detection.v src/top_level/srotas_processor.v \
+  src/wb_stage/*.v src/csr/*.v src/top_level/hazard_detection.v src/top_level/srotas_processor.v \
   src/testbenches/tb_isa_directed.v
 vvp sim.out
 
@@ -411,12 +413,12 @@ vvp sim.out
 # program.mem, since that's where $readmemh looks for it - see note below)
 iverilog -I src/common -I src/testbenches -o sim2.out -s tb_program \
   src/if_stage/*.v src/id_stage/*.v src/ex_stage/*.v src/mem_stage/*.v \
-  src/wb_stage/*.v src/top_level/hazard_detection.v src/top_level/srotas_processor.v \
+  src/wb_stage/*.v src/csr/*.v src/top_level/hazard_detection.v src/top_level/srotas_processor.v \
   src/testbenches/tb_program.v
 cp sim2.out mem/ && cd mem && vvp sim2.out && cd ..
 ```
 
-Both should end with `RESULT: ALL 134 CHECKS PASSED` / `RESULT: PASS`.
+Both should end with `RESULT: ALL 158 CHECKS PASSED` / `RESULT: PASS`.
 
 ### Vivado
 
@@ -435,7 +437,7 @@ initialization file (Vivado auto-exports it into the simulation run
 directory), and sets `tb_program` as the simulation top. Then, in the Flow
 Navigator: **Run Simulation → Run Behavioral Simulation**.
 
-To run the full 134-check regression instead:
+To run the full 158-check regression instead:
 ```tcl
 set_property top tb_isa_directed [get_filesets sim_1]
 launch_simulation
@@ -444,7 +446,7 @@ launch_simulation
 **2. Command-line flow** (`xvlog`/`xelab`/`xsim`, useful for scripting/CI):
 ```bash
 xvlog -i src/common -i src/testbenches src/if_stage/*.v src/id_stage/*.v \
-  src/ex_stage/*.v src/mem_stage/*.v src/wb_stage/*.v \
+  src/ex_stage/*.v src/mem_stage/*.v src/wb_stage/*.v src/csr/*.v \
   src/top_level/hazard_detection.v src/top_level/srotas_processor.v \
   src/testbenches/tb_isa_directed.v
 xelab tb_isa_directed -s tb_isa_directed_snap
@@ -496,12 +498,13 @@ To produce a `.mem` file:
 
 The processor implements the base RV32I integer ISA plus Zicsr (CSR
 read/modify/write instructions), Zifencei (`fence`/`fence.i`, both
-no-ops here), and M-mode exception handling (`ecall`/`ebreak`/`mret`,
-illegal instructions, misaligned addresses) — no compressed (C) or
-multiply/divide (M) extensions, and no interrupts or privilege modes
-(S/U) beyond the single M-mode this core always runs in — so a compiled
-program must target `-march=rv32i_zicsr_zifencei` and avoid anything that
-needs an OS, interrupts, or those other extensions.
+no-ops here), M-mode exception handling (`ecall`/`ebreak`/`mret`,
+illegal instructions, misaligned addresses), and the M extension
+(multiply/divide) — no atomics (A) or compressed (C) extensions yet, and
+no interrupts or privilege modes (S/U) beyond the single M-mode this core
+always runs in — so a compiled program must target
+`-march=rv32im_zicsr_zifencei` and avoid anything that needs an OS,
+interrupts, or those other extensions.
 
 ## Known limitations (current scope, for a single hobby-scale in-order core)
 
@@ -511,7 +514,9 @@ needs an OS, interrupts, or those other extensions.
   correctly, but there's no S/U privilege mode and no interrupt source
   (timer/external) yet — `mie`/`mip` exist in the CSR file but nothing
   drives or consumes them.
-- No M-extension (multiply/divide) or C-extension (compressed instructions).
+- Multiply/divide (M) stalls the pipeline for a fixed 32 cycles per
+  operation — no early-out for small operands, no A-extension (atomics)
+  or C-extension (compressed instructions) yet.
 - Single outstanding memory access per cycle, no caches.
 
 None of these are permanent limits, just what v1 covers — see

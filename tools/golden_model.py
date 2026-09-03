@@ -63,6 +63,8 @@ OP_LUI, OP_AUIPC, OP_JAL, OP_JALR = 0b0110111, 0b0010111, 0b1101111, 0b1100111
 OP_BRANCH, OP_LOAD, OP_STORE = 0b1100011, 0b0000011, 0b0100011
 OP_IMM, OP_REG, OP_SYSTEM, OP_MISC_MEM = 0b0010011, 0b0110011, 0b1110011, 0b0001111
 
+FUNCT7_MULDIV = 0b0000001  # M extension: shares OP_REG's opcode
+
 CAUSE_INSTR_MISALIGNED = 0
 CAUSE_ILLEGAL_INSTR = 2
 CAUSE_BREAKPOINT = 3
@@ -74,7 +76,7 @@ CSR_MSTATUS, CSR_MISA, CSR_MIE, CSR_MTVEC = 0x300, 0x301, 0x304, 0x305
 CSR_MSCRATCH, CSR_MEPC, CSR_MCAUSE, CSR_MTVAL, CSR_MIP = 0x340, 0x341, 0x342, 0x343, 0x344
 CSR_ID_REGS = {0xF11, 0xF12, 0xF13, 0xF14}  # mvendorid/marchid/mimpid/mhartid
 
-MISA_VAL = 0x40000100
+MISA_VAL = 0x40001100  # base ('I', bit 8) + M extension (bit 12), Phase 2
 
 SYS_IMM_ECALL, SYS_IMM_EBREAK, SYS_IMM_MRET, SYS_IMM_WFI = 0x000, 0x001, 0x302, 0x105
 
@@ -296,7 +298,10 @@ class GoldenModel:
             elif opcode == OP_IMM:
                 result, reg_write = self._alu_imm(funct3, funct7, rs1v, imm_i), True
             elif opcode == OP_REG:
-                result, reg_write = self._alu_reg(funct3, funct7, rs1v, rs2v), True
+                if funct7 == FUNCT7_MULDIV:
+                    result, reg_write = self._muldiv(funct3, rs1v, rs2v), True
+                else:
+                    result, reg_write = self._alu_reg(funct3, funct7, rs1v, rs2v), True
             elif opcode == OP_SYSTEM:
                 if funct3 != 0:
                     result, reg_write = self._csr_instr(funct3, csr_addr, rs1, rs1v), True
@@ -360,6 +365,48 @@ class GoldenModel:
             0b110: u32(a | b),
             0b111: u32(a & b),
         }[funct3]
+
+    def _muldiv(self, funct3, a, b):
+        # RV32M. Deliberately an if/elif chain, not the dict-literal style
+        # _alu_reg/_alu_imm use above - a dict literal evaluates every
+        # branch eagerly, which would raise ZeroDivisionError on DIV x,0
+        # before the intended (spec-mandated, non-trapping) result could
+        # ever be selected. Python's // and % floor toward negative
+        # infinity; RISC-V truncates toward zero, so the divide/remainder
+        # cases compute on magnitudes and fix the sign explicitly rather
+        # than relying on Python's operators directly.
+        if funct3 == 0b000:  # MUL: low 32 bits, sign-independent
+            return u32(s32(a) * s32(b))
+        if funct3 == 0b001:  # MULH: high 32 bits, signed x signed
+            return u32((s32(a) * s32(b)) >> 32)
+        if funct3 == 0b010:  # MULHSU: high 32 bits, signed x unsigned
+            return u32((s32(a) * u32(b)) >> 32)
+        if funct3 == 0b011:  # MULHU: high 32 bits, unsigned x unsigned
+            return u32((u32(a) * u32(b)) >> 32)
+        if funct3 == 0b100:  # DIV
+            sa, sb = s32(a), s32(b)
+            if sb == 0:
+                return MASK32
+            if sa == -(1 << 31) and sb == -1:
+                return u32(-(1 << 31))
+            q = abs(sa) // abs(sb)
+            return u32(-q if (sa < 0) != (sb < 0) else q)
+        if funct3 == 0b101:  # DIVU
+            if b == 0:
+                return MASK32
+            return u32(a // b)
+        if funct3 == 0b110:  # REM: sign follows the dividend
+            sa, sb = s32(a), s32(b)
+            if sb == 0:
+                return u32(sa)
+            if sa == -(1 << 31) and sb == -1:
+                return 0
+            r = abs(sa) % abs(sb)
+            return u32(-r if sa < 0 else r)
+        # 0b111: REMU
+        if b == 0:
+            return u32(a)
+        return u32(a % b)
 
     def _csr_instr(self, funct3, addr, rs1_field, rs1v):
         use_imm = bool(funct3 & 0b100)

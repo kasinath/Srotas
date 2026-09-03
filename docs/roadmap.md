@@ -240,9 +240,42 @@ block Phase 2.
 
 ## Phase 2 — Integer extensions
 
-- **M (multiply/divide)**: a multi-cycle unit that stalls the pipeline
-  the same way a load-use hazard does today, just for longer — no new
-  stall *mechanism* needed, only a new stall *source*.
+**Progress: M (multiply/divide) is done, shipping as v1.2.** A (atomics)
+is deferred to v1.3 — splitting the two keeps each a reviewable,
+independently-verified increment, the same discipline Phase 1 used.
+
+- ✅ **M (multiply/divide)**: `src/ex_stage/muldiv_unit.v`, a 32-cycle
+  iterative shift-add multiplier and restoring divider covering all eight
+  ops (`mul/mulh/mulhsu/mulhu/div/divu/rem/remu`). **This needed a genuinely
+  new stall mechanism, not just a new stall source** — the original plan
+  above (a multi-cycle unit "stalls the pipeline the same way a load-use
+  hazard does today, just for longer") turned out to be wrong once actually
+  built against this code, for a structural reason: the existing load-use
+  stall (`docs/processor_guide.md`, Section 6) *bubbles ID/EX forward* while
+  the stalled instruction itself continues into MEM — exactly backwards
+  from what a multi-cycle EX-stage unit needs, which is to *hold the
+  instruction still in EX* while bubbles move forward into MEM instead.
+  Concretely: `id_ex_register.v`'s flush is a *kill*, not a hold — data
+  fields still advance through it every cycle — so reusing it would have
+  overwritten the multiply's own operands mid-computation. `id_ex_register.v`
+  gained an actual `write_en` (full hold, data and control alike) for this;
+  `hazard_detection_unit`'s new `ex_busy` input drives it, and also freezes
+  PC and IF/ID alongside it, so no new instruction can enter the pipeline at
+  all while a multiply/divide is in flight. The result rides the existing
+  `alu_result` path into `ex_mem_register` (no new `result_src` encoding —
+  that 2-bit space was already fully used), suppressed the same way a
+  trapping instruction's effects already are. See
+  `docs/processor_guide.md`, Section 6, for the two stall shapes compared
+  side by side.
+
+  This closed a real latent bug in the process: `control_unit.v` only ever
+  checked `funct7[5]` to distinguish `ADD`/`SUB` and `SRL`/`SRA`, and
+  `FUNCT7_MULDIV` (`0000001`) has that bit clear — so before this change, a
+  `MUL` instruction silently decoded and executed as an `ADD` instead of
+  being recognized at all. Same class of bug as the `FENCE` one Phase 1
+  found (an unhandled encoding falling through to the wrong default), not a
+  new kind of mistake.
+
 - **A (atomics)**: `lr.w`/`sc.w` and the AMO instructions. Required
   because Linux's kernel-space spinlocks use atomics unconditionally,
   even on a single-hart system.
@@ -300,10 +333,11 @@ This phase is the release that earns the "Linux-capable" description.
 |---|---|
 | v1.0 | Verified RV32I, 5-stage in-order, forwarding, hazard stalling |
 | v1.1 | ✅ Phase 1 (done): Zicsr, Zifencei, M-mode traps, lockstep verification harness |
-| v1.2 | Phase 2 (current target): M and A extensions |
-| v1.3 | Phase 3: memory map, UART, CLINT |
-| v1.4 | Phase 4: PLIC, M/S/U privilege modes |
-| v1.5 | Phase 5: Sv32 MMU + TLB |
+| v1.2 | ✅ Phase 2, part 1 (done): M extension (multiply/divide) |
+| v1.3 | Phase 2, part 2 (current target): A extension (atomics) |
+| v1.4 | Phase 3: memory map, UART, CLINT |
+| v1.5 | Phase 4: PLIC, M/S/U privilege modes |
+| v1.6 | Phase 5: Sv32 MMU + TLB |
 | v2.0 | Phase 6: boots Linux |
 
 (This "Srotas v2.0" is a version number for the in-order core described

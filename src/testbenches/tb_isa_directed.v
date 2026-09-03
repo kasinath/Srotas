@@ -24,7 +24,11 @@
 // not-taken case), a JAL/JALR subroutine call-and-return, all six Zicsr
 // CSR instructions (including a CSR-produced value forwarded via EX/MEM
 // to the very next instruction), all five M-mode trap causes with a
-// clean MRET return, and FENCE/FENCE.I (Zifencei).
+// clean MRET return, FENCE/FENCE.I (Zifencei), and the M extension's
+// pipeline interactions - operand forwarding into and out of a held
+// multi-cycle muldiv, back-to-back muldiv instructions, a load-use hazard
+// immediately adjacent to one, and a branch/trap immediately after one
+// ends.
 // ============================================================================
 
 `timescale 1ns/1ps
@@ -446,6 +450,85 @@ module tb_isa_directed;
         emit(I_ADDI(22, 21, 32'd1));            chk(22, 32'd43);
 
         // ============================================================
+        // Section N: M extension (multiply/divide). Phase 2. Per-op
+        // correctness (every op, every sign combination, the /0 and
+        // overflow special cases) is tb_muldiv_unit.v's job; this section
+        // is the pipeline-interaction cases that only a full run exercises
+        // - the same split Phase 1 used between csr_file's unit test and
+        // this file's own Section K/L.
+        // ============================================================
+        begin : muldiv_section
+            integer n_branch_slot, n_branch_target;
+            integer n_trap_idx, n_trap_pc;
+
+            // N1: a producer overwriting a register immediately before a
+            // muldiv reads it - the muldiv's operand must be the freshly
+            // forwarded value (99) at the exact cycle it starts, not the
+            // stale pre-forwarding value (5) that a live (non-latching)
+            // re-read would fall back to partway through the 32-cycle
+            // hold, once EX/MEM and MEM/WB have drained past the producer
+            // (see muldiv_unit.v's header for why the operands are latched
+            // once, at start, and never re-sampled).
+            emit(I_ADDI(5, 0, 32'd5));   chk(5, 32'd5);
+            emit(I_ADDI(5, 0, 32'd99));  chk(5, 32'd99);
+            emit(I_MUL (6, 5, 5));       chk(6, 32'd9801); // 99*99
+
+            // N2: a MUL result forwarded via EX/MEM to the very next
+            // instruction - the muldiv analogue of Section K's CSR-
+            // forwarding check, proving ex_result (not the raw ALU
+            // output) is what reaches fwd_exmem_data on the completion
+            // cycle.
+            emit(I_ADDI(7, 0, 32'd6));   chk(7, 32'd6);
+            emit(I_ADDI(8, 0, 32'd7));   chk(8, 32'd7);
+            emit(I_MUL (9, 7, 8));       chk(9, 32'd42);
+            emit(I_ADDI(10, 9, 32'd0));  chk(10, 32'd42);
+
+            // N3: back-to-back muldiv, no idle cycle between them - a DIV
+            // immediately follows a MUL in program order, and the DIV's
+            // dividend is the MUL's own result, forwarded.
+            emit(I_MUL(11, 7, 8));       chk(11, 32'd42);  // 6*7
+            emit(I_DIV(12, 11, 7));      chk(12, 32'd7);   // 42/6
+
+            // N4: a load-use hazard immediately followed by a muldiv -
+            // two genuinely different stall shapes back to back
+            // (hazard_detection.v: the load-use bubble pushes forward
+            // while the load continues into MEM; the muldiv hold freezes
+            // ID/EX in place instead), proving neither corrupts the other.
+            emit(I_SW (12, 0, 32'd132));                   // mem[132] = 7
+            emit(I_LW (13, 0, 32'd132)); chk(13, 32'd7);
+            emit(I_MUL(2,  13, 13));     chk(2,  32'd49);
+
+            // N5: a taken branch immediately after a muldiv hold ends -
+            // proves ex_busy dropping doesn't leave pc_write_en/
+            // if_id_flush/id_ex_flush in a stale state that would block
+            // or mistime the very next cycle's redirect.
+            emit(I_ADDI(14, 0, 32'd10)); chk(14, 32'd10);
+            emit(I_ADDI(15, 0, 32'd2));  chk(15, 32'd2);
+            emit(I_DIV (16, 14, 15));    chk(16, 32'd5);   // 10/2, ends the hold
+            n_branch_slot = idx; emit(32'h0); // BEQ x0,x0,TARGET - patched below
+            emit(I_ADDI(17, 0, 32'd999));                  // POISON - must be squashed
+            emit(I_ADDI(17, 0, 32'd999));                  // POISON - must be squashed
+            n_branch_target = idx;
+            emit(I_ADDI(18, 0, 32'd111)); chk(18, 32'd111);
+            prog[n_branch_slot] = I_BEQ(0, 0, (n_branch_target - n_branch_slot) * 4);
+
+            // N6: a trap immediately after a muldiv hold ends - the case
+            // srotas_processor.v's fixed 2-cycle trap-debug delay (see its
+            // header comment) needs to still line up correctly even
+            // though a stall happened immediately beforehand. Reuses
+            // Section L's already-installed handler (mtvec was set there
+            // and is still active).
+            emit(I_ADDI(19, 0, 32'd8));  chk(19, 32'd8);
+            emit(I_ADDI(20, 0, 32'd3));  chk(20, 32'd3);
+            emit(I_DIV (21, 19, 20));    chk(21, 32'd2);   // 8/3, ends the hold
+            emit(I_ADDI(22, 0, 32'd129));chk(22, 32'd129); // odd address: half-misaligned
+            n_trap_idx = idx; emit(I_LH(24, 22, 32'd0));
+            n_trap_pc = n_trap_idx * 4;
+            chk(1, n_trap_pc); chk(3, `CAUSE_LOAD_MISALIGNED); chk(4, 32'd129); chk(1, n_trap_pc + 4);
+            emit(I_ADDI(25, 0, 32'd55)); chk(25, 32'd55);   // resumed cleanly
+        end
+
+        // ============================================================
         // Halt: spin on self forever so nothing further ever commits
         // ============================================================
         emit(I_JAL(0, 32'd0));
@@ -533,8 +616,10 @@ module tb_isa_directed;
         rst_n = 0;
         #12 rst_n = 1;
 
-        // Enough cycles for ~130 instructions plus stalls/bubbles.
-        #6000;
+        // Enough cycles for ~160 instructions plus stalls/bubbles, including
+        // Section N's several 32-cycle muldiv holds (each one alone costs
+        // as much simulated time as roughly 30 ordinary instructions).
+        #20000;
 
         $display("");
         $display("========================================");

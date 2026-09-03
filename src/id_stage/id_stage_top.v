@@ -19,6 +19,7 @@ module id_stage_top (
     input  wire        clk,
     input  wire        rst_n,
     input  wire        id_ex_flush,     // bubble: load-use stall or branch squash
+    input  wire        id_ex_write_en,  // hold: EX-stage multi-cycle muldiv busy
 
     input  wire [31:0] instruction,
     input  wire [31:0] pc,
@@ -62,7 +63,8 @@ module id_stage_top (
     output wire        ex_ecall,
     output wire        ex_ebreak,
     output wire        ex_mret,
-    output wire        ex_illegal
+    output wire        ex_illegal,
+    output wire        ex_is_muldiv
 );
 
     wire [6:0] opcode  = instruction[6:0];
@@ -100,6 +102,7 @@ module id_stage_top (
     wire        ebreak;
     wire        mret;
     wire        illegal;
+    wire        is_muldiv;
 
     register_file u_register_file (
         .clk          (clk),
@@ -134,7 +137,8 @@ module id_stage_top (
         .ecall       (ecall),
         .ebreak      (ebreak),
         .mret        (mret),
-        .illegal     (illegal)
+        .illegal     (illegal),
+        .is_muldiv   (is_muldiv)
     );
 
     sign_extend u_sign_extend (
@@ -147,6 +151,7 @@ module id_stage_top (
         .clk       (clk),
         .rst_n     (rst_n),
         .flush     (id_ex_flush),
+        .write_en  (id_ex_write_en),
 
         .pc        (pc),
         .pc_plus4  (pc_plus4),
@@ -175,6 +180,7 @@ module id_stage_top (
         .ebreak      (ebreak),
         .mret        (mret),
         .illegal     (illegal),
+        .is_muldiv   (is_muldiv),
 
         .pc_out         (ex_pc),
         .pc_plus4_out   (ex_pc_plus4),
@@ -202,7 +208,8 @@ module id_stage_top (
         .ecall_out       (ex_ecall),
         .ebreak_out      (ex_ebreak),
         .mret_out        (ex_mret),
-        .illegal_out     (ex_illegal)
+        .illegal_out     (ex_illegal),
+        .is_muldiv_out   (ex_is_muldiv)
     );
 
 endmodule

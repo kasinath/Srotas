@@ -44,8 +44,10 @@ set rtl_files [list \
     "$origin_dir/src/id_stage/id_stage_top.v" \
     "$origin_dir/src/ex_stage/alu.v" \
     "$origin_dir/src/ex_stage/branch_unit.v" \
+    "$origin_dir/src/ex_stage/muldiv_unit.v" \
     "$origin_dir/src/ex_stage/ex_mem_register.v" \
     "$origin_dir/src/ex_stage/ex_stage_top.v" \
+    "$origin_dir/src/csr/csr_file.v" \
     "$origin_dir/src/mem_stage/data_memory.v" \
     "$origin_dir/src/mem_stage/mem_wb_register.v" \
     "$origin_dir/src/mem_stage/mem_stage_top.v" \

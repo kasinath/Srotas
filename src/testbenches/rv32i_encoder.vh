@@ -75,6 +75,16 @@ function [31:0] I_SRA;  input [4:0] rd, rs1, rs2; I_SRA  = r_type(7'b0100000, rs
 function [31:0] I_OR;   input [4:0] rd, rs1, rs2; I_OR   = r_type(7'b0000000, rs2, rs1, 3'b110, rd, `OP_REG); endfunction
 function [31:0] I_AND;  input [4:0] rd, rs1, rs2; I_AND  = r_type(7'b0000000, rs2, rs1, 3'b111, rd, `OP_REG); endfunction
 
+// --- M extension (Phase 2): funct7=0000001, same OP_REG opcode as above --
+function [31:0] I_MUL;    input [4:0] rd, rs1, rs2; I_MUL    = r_type(`FUNCT7_MULDIV, rs2, rs1, `FUNCT3_MUL,    rd, `OP_REG); endfunction
+function [31:0] I_MULH;   input [4:0] rd, rs1, rs2; I_MULH   = r_type(`FUNCT7_MULDIV, rs2, rs1, `FUNCT3_MULH,   rd, `OP_REG); endfunction
+function [31:0] I_MULHSU; input [4:0] rd, rs1, rs2; I_MULHSU = r_type(`FUNCT7_MULDIV, rs2, rs1, `FUNCT3_MULHSU, rd, `OP_REG); endfunction
+function [31:0] I_MULHU;  input [4:0] rd, rs1, rs2; I_MULHU  = r_type(`FUNCT7_MULDIV, rs2, rs1, `FUNCT3_MULHU,  rd, `OP_REG); endfunction
+function [31:0] I_DIV;    input [4:0] rd, rs1, rs2; I_DIV    = r_type(`FUNCT7_MULDIV, rs2, rs1, `FUNCT3_DIV,    rd, `OP_REG); endfunction
+function [31:0] I_DIVU;   input [4:0] rd, rs1, rs2; I_DIVU   = r_type(`FUNCT7_MULDIV, rs2, rs1, `FUNCT3_DIVU,   rd, `OP_REG); endfunction
+function [31:0] I_REM;    input [4:0] rd, rs1, rs2; I_REM    = r_type(`FUNCT7_MULDIV, rs2, rs1, `FUNCT3_REM,    rd, `OP_REG); endfunction
+function [31:0] I_REMU;   input [4:0] rd, rs1, rs2; I_REMU   = r_type(`FUNCT7_MULDIV, rs2, rs1, `FUNCT3_REMU,   rd, `OP_REG); endfunction
+
 // --- I-type ALU mnemonics ----------------------------------------------
 function [31:0] I_ADDI;  input [4:0] rd, rs1; input [31:0] imm; I_ADDI  = i_type(imm, rs1, 3'b000, rd, `OP_IMM); endfunction
 function [31:0] I_SLTI;  input [4:0] rd, rs1; input [31:0] imm; I_SLTI  = i_type(imm, rs1, 3'b010, rd, `OP_IMM); endfunction

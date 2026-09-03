@@ -23,6 +23,21 @@
 // csr_op: each one drives a real trap or return in EX once consumed, and a
 // squashed instruction (wrong-path after a branch, or a load-use bubble)
 // must never be allowed to fire one.
+//
+// write_en is a full hold, not a flush: when low (the multi-cycle M-extension
+// unit in EX is busy), every field - data AND control - keeps its current
+// value, so the in-flight multiply/divide's operands and opcode stay put
+// while it iterates. This is deliberately the opposite of flush, which lets
+// data fields advance while zeroing control - a held instruction is still
+// live, not a bubble. is_muldiv is zeroed on flush alongside reg_write/
+// mem_read/mem_write/csr_op: it triggers a real EX-stage side effect (a
+// multi-cycle unit starting), so a squashed instruction must never carry a
+// live is_muldiv forward, exactly like csr_op above. flush and write_en=0
+// never coexist by construction: the only way id_ex_flush ever fires is a
+// load-use hazard or a redirect, both of which require the EX-stage
+// instruction (the one write_en would be holding) to NOT be a muldiv
+// (mem_read=0, no branch/trap paths reachable from is_muldiv) - see
+// hazard_detection.v.
 // ============================================================================
 
 `timescale 1ns/1ps
@@ -31,6 +46,7 @@ module id_ex_register (
     input  wire        clk,
     input  wire        rst_n,
     input  wire        flush,
+    input  wire        write_en,
 
     input  wire [31:0] pc,
     input  wire [31:0] pc_plus4,
@@ -59,6 +75,7 @@ module id_ex_register (
     input  wire        ebreak,
     input  wire        mret,
     input  wire        illegal,
+    input  wire        is_muldiv,
 
     output reg  [31:0] pc_out,
     output reg  [31:0] pc_plus4_out,
@@ -86,7 +103,8 @@ module id_ex_register (
     output reg         ecall_out,
     output reg         ebreak_out,
     output reg         mret_out,
-    output reg         illegal_out
+    output reg         illegal_out,
+    output reg         is_muldiv_out
 );
 
     always @(posedge clk or negedge rst_n) begin
@@ -117,6 +135,10 @@ module id_ex_register (
             ebreak_out     <= 1'b0;
             mret_out       <= 1'b0;
             illegal_out    <= 1'b0;
+            is_muldiv_out  <= 1'b0;
+        end else if (!write_en) begin
+            // EX is busy (multi-cycle muldiv in progress): hold everything,
+            // data and control alike. See header comment.
         end else begin
             pc_out         <= pc;
             pc_plus4_out   <= pc_plus4;
@@ -146,6 +168,7 @@ module id_ex_register (
                 ebreak_out     <= 1'b0;
                 mret_out       <= 1'b0;
                 illegal_out    <= 1'b0;
+                is_muldiv_out  <= 1'b0;
             end else begin
                 reg_write_out  <= reg_write;
                 mem_read_out   <= mem_read;
@@ -159,6 +182,7 @@ module id_ex_register (
                 ebreak_out     <= ebreak;
                 mret_out       <= mret;
                 illegal_out    <= illegal;
+                is_muldiv_out  <= is_muldiv;
             end
         end
     end

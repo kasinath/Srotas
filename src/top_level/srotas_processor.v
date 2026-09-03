@@ -62,6 +62,7 @@ module srotas_processor #(
     wire pc_write_en, if_id_write_en, if_id_flush;
     wire ex_redirect;
     wire [31:0] ex_redirect_target;
+    wire id_ex_write_en, ex_busy;
 
     if_stage_top #(
         .IMEM_WORDS     (IMEM_WORDS),
@@ -99,6 +100,7 @@ module srotas_processor #(
     wire        ex_csr_use_imm;
     wire [11:0] ex_csr_addr;
     wire        ex_ecall, ex_ebreak, ex_mret, ex_illegal;
+    wire        ex_is_muldiv;
 
     wire        final_wb_reg_write;
     wire [4:0]  final_wb_rd_addr;
@@ -108,6 +110,7 @@ module srotas_processor #(
         .clk          (clk),
         .rst_n        (rst_n),
         .id_ex_flush  (id_ex_flush),
+        .id_ex_write_en (id_ex_write_en),
 
         .instruction  (if_id_instr),
         .pc           (if_id_pc),
@@ -146,7 +149,8 @@ module srotas_processor #(
         .ex_ecall       (ex_ecall),
         .ex_ebreak      (ex_ebreak),
         .ex_mret        (ex_mret),
-        .ex_illegal     (ex_illegal)
+        .ex_illegal     (ex_illegal),
+        .ex_is_muldiv   (ex_is_muldiv)
     );
 
     // -------------------------------------------------------------------
@@ -195,6 +199,7 @@ module srotas_processor #(
         .ebreak      (ex_ebreak),
         .mret        (ex_mret),
         .illegal     (ex_illegal),
+        .is_muldiv   (ex_is_muldiv),
 
         .forward_a      (forward_a),
         .forward_b      (forward_b),
@@ -203,6 +208,8 @@ module srotas_processor #(
 
         .redirect        (ex_redirect),
         .redirect_target (ex_redirect_target),
+
+        .ex_busy         (ex_busy),
 
         .trap_debug_valid (ex_trap_valid),
         .trap_debug_cause (ex_trap_cause),
@@ -355,11 +362,13 @@ module srotas_processor #(
         .mem_wb_reg_write  (final_wb_reg_write),
 
         .ex_redirect (ex_redirect),
+        .ex_busy     (ex_busy),
 
         .pc_write_en    (pc_write_en),
         .if_id_write_en (if_id_write_en),
         .if_id_flush    (if_id_flush),
         .id_ex_flush    (id_ex_flush),
+        .id_ex_write_en (id_ex_write_en),
 
         .forward_a (forward_a),
         .forward_b (forward_b)
